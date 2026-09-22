@@ -2,7 +2,7 @@
 
 [English](README.md) | 简体中文
 
-给 [ZCode](https://zcode.ai) 桌面客户端（Electron 应用）加上一个悬浮的 token 用量状态条。数据源是本地 SQLite（`~/.zcode/cli/db/db.sqlite` 的 `model_usage` / `turn_usage` / `tool_usage` 表，每次模型请求一行），**全程只读、不联网**。
+给 [ZCode](https://zcode.ai) 桌面客户端（Electron 应用）加上一个悬浮的 token 用量状态条。数据源是本地 SQLite（`~/.zcode/cli/db/db.sqlite` 的 `model_usage` / `turn_usage` / `tool_usage` 表，每次模型请求一行），**只读、不联网**；唯一的出网行为是「额度」条目按需查询服务商余额/套餐接口（可在设置面板关闭）。
 
 平台：Windows、macOS ｜ 许可：[MIT](LICENSE)
 
@@ -14,7 +14,7 @@ ZCode 的插件机制（`plugin.json`）只能提供 MCP / skills / commands / h
 
 ## 功能
 
-状态条悬浮在 ZCode 对话窗口最底部，实时显示本窗口的 token 用量与运行状态——数据只读本地数据库（每次模型请求一行），全程不联网、零轮询。
+状态条悬浮在 ZCode 对话窗口最底部，实时显示本窗口的 token 用量与运行状态——数据只读本地数据库（每次模型请求一行），零轮询；「额度」是唯一出网点（约 5 分钟一次，可关闭）。
 
 ![状态条整体效果](docs/tour/shots/hero.png)
 
@@ -60,7 +60,11 @@ ZCode 的插件机制（`plugin.json`）只能提供 MCP / skills / commands / h
 
 当前会话后台子代理的 token 消耗，独立统计、不计入会话累计；蓝色 ● 表示有子代理正在运行。悬停显示汇总，点击弹出固定明细面板——按页签切换汇总与各子代理，每个子代理显示派发任务名与输入/输出/缓存/思考明细。
 
-### ⑧ 设置面板
+### ⑧ 额度
+
+套餐剩余或 API 余额：按最后一条调用所属服务商自动识别（DeepSeek / 智谱·Z.ai / OpenRouter）。套餐显示 5 小时/每周窗口的剩余百分比（三档变色）与重置时间；余额显示币种金额。约 5 分钟缓存一次；刷新失败时保留上次数据并标注「x 分钟前」。中转站可在 `~/.zcode/v2/provider_config.json` 的规则里配置 `balanceUrl` / `balanceKind` 接入自定义余额接口。额度是唯一的出网行为，可在设置面板一键关闭。
+
+### ⑨ 设置面板
 
 ![设置面板](docs/tour/shots/item-8.png)
 
