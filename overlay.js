@@ -37,7 +37,7 @@
   /* ---------- 共享状态（多实例一致）：显示项/语言/上下文覆盖/最近一次数据 ---------- */
   var LS = { show: "zusage3.show", ctxOv: "zusage3.ctxOv", lang: "zusage3.lang" };
   var state = {
-    show: { win: 1, ctx: 1, today: 1, turn: 1, sub: 1, tools: 1 },
+    show: { win: 1, ctx: 1, today: 1, turn: 1, sub: 1, tools: 1, quota: 1 },
     ctxOv: "", data: null,
     lang: "zh",
   };
@@ -146,7 +146,7 @@
   /* ---------- 实例工厂（v61.1）：一个 pane 一套 条/面板/气泡/tooltip/定位循环。
    * slot 0 保留 #zusage-bar/#zusage-tip 兼容 id（泵热更新按它清理），其余实例仅类名。 */
   function spawnInstance(pid, slot) {
-    var VERSION = "v61";   // v61：修正常聊天误藏（删 coverLock/穿透=被盖，改幽灵子树检测）+ 分屏多实例   // 随提交递增（悬停 ⚙ 面板可见）；未提交的中间迭代不涨号
+    var VERSION = "v62";   // v62：额度条目（套餐剩余/API 余额，三档变色，失败保留上次数据并标注年龄）   // 随提交递增（悬停 ⚙ 面板可见）；未提交的中间迭代不涨号
     /* ---------- 状态（实例级） ---------- */
     var excOn = false,    // 本 pane 会话处于"上下文超限被拒"状态（render 时按 picked 会话计算）
       excGone = false,    // 用户点 ✕ 关闭了本次气泡；超限解除后自动复位
@@ -315,6 +315,7 @@
       '<label><input type="checkbox" data-k="tools"><span>' + L("工具调用", "Tool calls") + '<em>' + L("当前会话，悬停看各工具明细与错误", "per-session, hover for per-tool details and errors") + '</em></span></label>' +
       '<label><input type="checkbox" data-k="today"><span>' + L("今日合计", "Today's total") + '<em>' + L("今天所有会话的消耗", "consumption of all sessions today") + '</em></span></label>' +
       '<label><input type="checkbox" data-k="sub"><span>' + L("子代理", "Sub-agents") + '<em>' + L("后台子代理消耗，点击条目看明细面板", "background sub-agent usage, click the item for the detail panel") + '</em></span></label>' +
+      '<label><input type="checkbox" data-k="quota"><span>' + L("额度", "Quota") + '<em>' + L("套餐剩余（5 小时/周）或 API 余额；约 5 分钟刷新一次", "plan remaining (5h/weekly) or API balance; refreshes about every 5 min") + '</em></span></label>' +
       '<div class="hr"></div>' +
       '<div class="cap">' + L("上下文窗口", "Context window") + '</div>' +
       '<label><input type="text" class="zu-ctxov" placeholder="' + L("自动(按模型)", "auto") + '"><span class="dim">' + L("留空 = 自动（原生UI > 模型目录）", "leave empty = auto (native UI > model catalog)") + '</span></label>' +
@@ -495,6 +496,54 @@
           '<span class="' + tpsCls + '">' + last.tps + '</span><span class="dim">t/s</span>',
           L("生成速度：最近完成请求的输出 tokens ÷ 生成耗时（首 token → 完成）\n≥70 t/s 绿色 · 40–70 黄色 · <40 红色",
             "Generation speed: output tokens ÷ generation time of the latest completed request (first token → completion)\n≥70 t/s green · 40–70 yellow · <40 red"));
+      }
+      if (state.show.quota && d.quota) {
+        /* 额度（全局量，不随会话变化；数据由 serve 快照携带，语义见 zquota.py）：
+         * 套餐显示各窗口剩余%（三档变色），余额显示币种金额；刷新失败保留上次数据并标注年龄 */
+        var q = d.quota, qv = null, qt = null;
+        var qAgeTxt = q.age_s == null ? "" : (q.age_s >= 90 ? Math.round(q.age_s / 60) + L(" 分钟前", " min ago") : q.age_s + L(" 秒前", " s ago"));
+        if (q.ok && q.kind === "quota") {
+          var wparts = [], wlines = [], pcts = [];
+          (q.windows || []).forEach(function (w) {
+            if (w.remaining_pct == null) return;
+            var lb = w.label || "";
+            var short = lb.indexOf("5 小时") >= 0 ? "5h" : (lb.indexOf("每周") >= 0 ? L("周", "wk") : (lb.indexOf("月度") >= 0 ? L("月", "mo") : lb));
+            pcts.push(w.remaining_pct);
+            wparts.push(short + " " + Math.round(w.remaining_pct) + "%");
+            wlines.push("  " + lb + L(" 剩余 ", " remaining ") + Math.round(w.remaining_pct) + "%" +
+              (w.limit ? L("（", " (") + (w.remaining != null ? Math.round(w.remaining) : "?") + "/" + Math.round(w.limit) + L(" 积分）", " credits)") : "") +
+              (w.reset_at ? L("　重置于 ", " resets ") + w.reset_at : ""));
+          });
+          if (wparts.length) {
+            var minPct = Math.min.apply(null, pcts);
+            var qc = minPct >= 50 ? "ok" : minPct >= 20 ? "warm" : "hot";
+            qv = '<span class="' + qc + '">' + wparts.join(" · ") + "</span>" +
+              (q.stale ? '<span class="dim">(' + qAgeTxt + ")</span>" : "");
+            qt = L("额度：", "Quota: ") + (q.provider_name || "") + "\n" + wlines.join("\n") +
+              (q.fetched_at ? "\n" + L("更新于 ", "Updated ") + q.fetched_at : "") +
+              (q.stale ? "\n⚠ " + L("当前显示 ", "Showing ") + qAgeTxt + L("的缓存数据，后台刷新中或上次刷新失败", " cached data; refreshing in background or last refresh failed") : "");
+          }
+        } else if (q.ok && q.kind === "balance") {
+          var cur = (q.currencies || [])[0];
+          if (cur) {
+            qv = '<span class="v">' + cur.currency + " " + cur.total + "</span>" +
+              (q.stale ? '<span class="dim">(' + qAgeTxt + ")</span>" : "");
+            qt = L("余额：", "Balance: ") + (q.provider_name || "") + "\n" +
+              (q.currencies || []).map(function (c) {
+                return "  " + c.currency + " " + c.total + L("（充值 ", " (topped up ") + c.topped_up + L(" / 赠送 ", " / granted ") + c.granted + L("）", ")");
+              }).join("\n") +
+              (q.fetched_at ? "\n" + L("更新于 ", "Updated ") + q.fetched_at : "") +
+              (q.stale ? "\n⚠ " + L("当前为 ", "Showing ") + qAgeTxt + L("的缓存数据", " cached data") : "");
+          }
+        } else if (q.reason === "warming") {
+          qv = '<span class="dim">…</span>';
+          qt = L("额度：数据预热中，稍后自动出现", "Quota: warming up, will appear shortly");
+        } else {
+          qv = '<span class="dim">--</span>';
+          qt = L("额度：", "Quota: ") + (q.message || L("暂不可用", "unavailable")) +
+            (q.stale && q.age_s != null ? L("\n（上次数据为 ", "\n(last data ") + qAgeTxt + L("，刷新中或刷新失败）", ", refreshing or failed)") : "");
+        }
+        if (qv) it(ico('<rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10h18"/><circle cx="17" cy="14" r="1.5"/>') + qv, qt);
       }
       if (state.show.ctx) {
         var cw = parseInt(state.ctxOv, 10) || d.native_ctx || d.context_window || 0;
@@ -691,6 +740,7 @@
         code: p.code, ctx_exc: p.ctx_exc, tools: p.tools,
         remote: !!p.remote, remote_host: p.remote_host || "", remote_error: d.remote_error || "",
         sub: p.sub || {requests: 0, total: 0, input: 0, output: 0, cache_read: 0, active: false, list: []},
+        quota: d.quota,   // 额度为全局量（不随会话），由 serve 快照携带；未携带时为 undefined，条目自动隐藏
       };
       lastSub = view.sub;   // 子代理明细面板的数据源（开关面板/数据推送刷新用）
       refreshWants();

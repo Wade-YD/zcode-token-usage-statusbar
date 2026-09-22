@@ -2,7 +2,7 @@
 
 [中文](README.zh-CN.md) | English
 
-A floating status bar for the [ZCode](https://zcode.ai) desktop client (Electron app) that shows real-time token usage of the current conversation window. It only reads the local SQLite database — never touches the network.
+A floating status bar for the [ZCode](https://zcode.ai) desktop client (Electron app) that shows real-time token usage of the current conversation window. It reads the local SQLite database (read-only); the Quota item is the only feature that goes online — it queries your provider's balance/plan API on demand and can be toggled off.
 
 > This page is a condensed English overview. The in-depth docs in this repo are in Chinese.
 
@@ -54,7 +54,11 @@ Token consumption across all of today's sessions, aggregated across conversation
 
 Token usage of background sub-agents in the current session, tracked separately from the session total; a blue ● means one is running right now. Hover shows a summary; clicking opens a fixed detail panel with tabs for the summary and each sub-agent's dispatch task name plus its input/output/cache/thinking breakdown.
 
-### ⑧ Settings Panel
+### ⑧ Quota
+
+Plan remaining or API balance, resolved automatically from the provider of your latest request (DeepSeek / Z.ai · BigModel / OpenRouter). Plans show the 5-hour and weekly windows with remaining percentage (three-tier colors) and reset times; balances show per-currency amounts. Cached for about 5 minutes; when a refresh fails the last data is kept and annotated with its age ("x min ago"). Relay services can expose a custom endpoint via `balanceUrl` / `balanceKind` in `~/.zcode/v2/provider_config.json`. Quota is the only outbound request and can be switched off in the ⚙ panel.
+
+### ⑨ Settings Panel
 
 ![Settings panel](docs/tour/shots/en/item-8.png)
 
@@ -78,7 +82,7 @@ Click ⚙ to toggle any bar item, override the context window size, or switch th
   }
   ```
 - **MCP in-chat query**: `token_usage(scope)` supporting current / today / week / days:N / sessions:N / models:days / session:<id prefix> (with per-model and subagent details) / workspace:<dir keyword> (aggregates a workspace's main sessions + subagents, with per-session and per-model details; unmatched keywords return candidate directories).
-- **CLI**: `python zusage.py [now|today|json|days N|sessions [N]|models [days]|workspace <dir keyword>|session <id prefix>|watch]`.
+- **CLI**: `python zusage.py [now|today|json|quota|days N|sessions [N]|models [days]|workspace <dir keyword>|session <id prefix>|watch]`.
 - **/usage command** in the chat input.
 
 ## Installation
@@ -97,7 +101,7 @@ One command does it all: locate the ZCode installation (`ZCODE_ASAR` environment
 
 ## Data Source
 
-Reads `~/.zcode/cli/db/db.sqlite` (`model_usage` / `turn_usage` / `tool_usage` — one row per model request), strictly read-only, never online. Numbers refresh event-driven when a request completes; when idle there are zero extra processes and zero polling.
+Reads `~/.zcode/cli/db/db.sqlite` (`model_usage` / `turn_usage` / `tool_usage` — one row per model request), strictly read-only. The Quota item is the only outbound feature (provider balance/plan API, ~5-minute cache, can be disabled); everything else never goes online. Numbers refresh event-driven when a request completes; when idle there are zero extra processes and zero polling.
 
 ## Uninstall
 

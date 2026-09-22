@@ -369,6 +369,7 @@ def get_quota(provider_id: str | None = None, cfg: dict | None = None) -> dict:
         if hit and age < ttl:
             payload = dict(_cache["payload"])
             payload["age_s"] = 0
+            payload["stale"] = False
             return payload
         stale = dict(_cache["payload"]) if hit else None
         start_bg = stale is not None and not _inflight
@@ -380,6 +381,7 @@ def get_quota(provider_id: str | None = None, cfg: dict | None = None) -> dict:
         if start_bg:
             threading.Thread(target=_background_refresh, args=(pid,), daemon=True).start()
         stale["age_s"] = age
+        stale["stale"] = True
         return stale
 
     # 首次（无缓存）：同步取一次，短超时兜底
@@ -388,6 +390,7 @@ def get_quota(provider_id: str | None = None, cfg: dict | None = None) -> dict:
     if fresh.get("ok"):
         _store(pid, fresh)
         fresh["age_s"] = 0
+        fresh["stale"] = False
         return fresh
     fresh["age_s"] = None
     return fresh
@@ -401,11 +404,14 @@ def cached_payload(provider_id: str | None = None, cfg: dict | None = None) -> d
     """
     global _inflight
     pid = provider_id or latest_provider_id()
+    ttl = max(30, int(((cfg or {}).get("quota") or {}).get("ttl_s") or DEFAULT_TTL_S))
     with _cache_lock:
         hit = _cache["payload"] is not None and _cache["key"] == pid
         if hit:
             payload = dict(_cache["payload"])
-            payload["age_s"] = int(time.monotonic() - _cache["at"])
+            age = int(time.monotonic() - _cache["at"])
+            payload["age_s"] = age
+            payload["stale"] = age >= ttl
             return payload
         start_bg = not _inflight
         if start_bg:

@@ -5,6 +5,9 @@
   "hot_reload": true,
   "context_window": 1000000,
   "lang": "zh",
+  "quota": {
+    "ttl_s": 300
+  },
   "remote": {
     "enabled": false,
     "ssh": "ssh 用户名@服务器地址",
