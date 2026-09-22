@@ -90,7 +90,7 @@ ZCode 的插件机制（`plugin.json`）只能提供 MCP / skills / commands / h
 
   前提：本地到服务器的 `ssh` 免密可用（公钥认证）。实现上，本地 `zusage.py` 对本地库查不到的会话 id（双重白名单校验）执行 `ssh <host> python3 <script> json <sids>`，把远端快照合并进 payload；远端返回 `known_sids` 供负缓存（确认无此会话 2 分钟内不重问，ssh 失败 60 秒退避），本地新会话（session 表已有行）不会触发远端查询。泵在远端会话聚焦期间按 `poll_ms` 轮询（本地会话仍是纯事件触发、零轮询）；`poll_ms` 别低于 1000，跨公网建议配合 ssh ControlMaster 连接复用。
 - **MCP 对话内查询**：`token_usage(scope)` 工具，scope 支持 current / today / week / days:N / sessions:N / models:days / session:<id前缀>（含按模型与子代理明细）/ workspace:<目录关键词>（按工作区聚合主会话+子代理，含按会话与按模型明细；关键词未命中时会列出候选目录）。
-- **CLI**：`python zusage.py [now|today|json|days N|sessions [N]|models [days]|workspace <目录关键词>|session <id前缀>|watch [秒]]`。
+- **CLI**：`python zusage.py [now|today|json|quota|speed [N]|days N|sessions [N]|models [days]|workspace <目录关键词>|session <id前缀>|watch [秒]]`。
 - **/usage 命令**：对话输入框触发 MCP 查询。
 
 ## 文件说明
@@ -103,10 +103,11 @@ ZCode 的插件机制（`plugin.json`）只能提供 MCP / skills / commands / h
 | `patch_install.py` | asar 注入/卸载工具（install.py 的底层，可单独用）：在入口 `out/main/index.js` 尾部追加/剥离本工具的 dynamic import 行 → 重打包 → 自检 → 原子替换。不制作也不依赖备份，卸载只动自己的注入行（其它工具后装的注入行不受影响）。幂等，自动替换旧注入行（迁移友好）。安装成功自动弹出监控窗口。 |
 | `install_monitor.py` | 安装监控窗口（常驻命令行，每 10 秒检测一次）：持续提醒重启 ZCode；重启后通过 diag 更新确认注入加载，显示成功并自动退出。运行中原子替换失败（生成 .tmp）时，它还会在 ZCode 退出后自动完成替换——**收尾不依赖计划任务**。 |
 | `zusage.py` | 查询库 + CLI + 机器可读快照（`json` 子命令，状态条数据源）。 |
+| `zquota.py` | 额度/余额查询模块（额度条目的数据源）：三级 provider 解析、DeepSeek/智谱/OpenRouter 三家查询、自定义 `balanceUrl`/`balanceKind`、5 分钟缓存与失败保留。**唯一的出网点**，走防护闸（仅 https + 公网解析校验 + 拒绝重定向）。 |
 | `usage_mcp.py` | 零依赖 stdio MCP server。 |
 | `config.example.json` | 运行配置模板（安装时生成到数据目录的 `config.json`；含本机路径，不入库）。 |
 
-**数据目录 `~/.zcode/zcode-token-usage-statusbar/`** 是标准安装的运行目录：运行时副本（`inject-main.cjs`/`overlay.js`/`zusage.py`/`usage_mcp.py`）、`config.json`、诊断产物 `diag-<n>.json`（每窗口一份，主进程定期回写）都在这里。本仓库只是源码，**clone 目录可以随意搬走或删除，不影响已安装的实例**。
+**数据目录 `~/.zcode/zcode-token-usage-statusbar/`** 是标准安装的运行目录：运行时副本（`inject-main.cjs`/`overlay.js`/`zusage.py`/`zquota.py`/`usage_mcp.py`）、`config.json`、诊断产物 `diag-<n>.json`（每窗口一份，主进程定期回写）都在这里。本仓库只是源码，**clone 目录可以随意搬走或删除，不影响已安装的实例**。
 
 ## 安装
 
@@ -153,6 +154,14 @@ python patch_install.py install
 | `zusage.py` | 重跑 install.py 同步副本后，泵检测到副本 mtime 变化即自动重启常驻 python（~2 秒生效）；一次性回退模式下仍是每次轮询新进程、下次轮询生效 |
 | `config.json`（数据目录） | 下次拉取时生效（拉取由 db 写入触发；完全空闲时最迟一个兜底心跳，默认 30s） |
 | `inject-main.cjs` 本身 / 首次安装 / 标准↔dev 互切 | 重跑 `python install.py` 后**需重启 ZCode**（注入行含绝对路径，脚本自动替换旧行） |
+
+## 与其它注入类工具共存（重要）
+
+本工具通过修改 `app.asar` 注入一行 loader。若机器上同时存在其它同样改 asar 的工具（例如旧版 api-quota 状态条）：
+
+- **不要跨 ZCode 版本升级保留多套注入**：升级会覆盖 asar，之后请先完整卸载其中一套，再重打另一套，避免两套自愈逻辑互相覆盖；
+- 单步重打：升级后重跑 `python install.py`（注入行不变时秒级完成，不重打包）；
+- 卸载本工具：`python install.py --remove`（只剥离自己的注入行，其它工具的注入不受影响）。
 
 ## 配置（config.json）
 
