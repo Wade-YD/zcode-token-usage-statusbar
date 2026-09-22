@@ -6,7 +6,7 @@
 
 - [x] 1.1 `git fetch --unshallow` 补全上游历史（61 提交）；`origin`→`upstream` 改名；本 change 工件已提交，验证：`git log --oneline | wc -l`=61、`git remote -v` 含 upstream
 - [x] 1.2 新建 GitHub 私有仓库并推送（`Wade-YD/zcode-token-usage-statusbar`，private=true，全量历史；API 建仓——gh CLI 未安装、curl 中文描述曾致 JSON 解析失败，改 ASCII 描述解决）
-- [ ] 1.3 试装新基座：**需用户在自有终端执行**（harness 安全钩子拦截 asar 写入的自动化执行）：`cd D:\桌面\私人图书馆\7-工具箱\1-project\zcode-token-usage-statusbar && python install.py` → 若 asar 被运行中的 ZCode 占用将弹监控窗、完全退出 ZCode 后自动完成替换 → 重启 ZCode 验证状态条与 diag 回写
+- [x] 1.3 试装完成（用户自有终端执行 + 重启验证）：asar 注入标记命中；运行时目录就位（config/diag/inject-main/overlay/zusage）；diag 心跳持续更新（23:06:06→23:08:22）；`#zusage-bar` 已渲染（838×32 @ y=871，below-card 模式）；泵常驻 v10 且当前会话已绑定（activeMap/wants=sess_bf225fce）；MCP 注册（zcode-token-usage-statusbar）与 /usage 命令就位；旧 api-quota 状态条共存中
 - [x] 1.4 旧插件基线已记录：`patch-zcode.py --check` = 已注入、index.html 26614 字节 @ 316719209、backup 存在、asar 可写
 - [x] 1.5 上游安全告警加固（基座引入时随修）：`install_monitor.py` 两处 `os.system` 改无 shell 写法（ANSI 清屏 / `SetConsoleTitleW`）、`patch_install.py` 的 asar 重建写入限同目录、`zusage.py` SSH 远端 script/python 参数白名单；验证：Mimosa 项目扫描通过、`zusage.py now` 冒烟正常
 
