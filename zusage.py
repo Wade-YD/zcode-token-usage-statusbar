@@ -14,6 +14,11 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
+try:
+    import zquota          # 额度查询模块（缺失时状态条其余部分照常工作）
+except Exception:
+    zquota = None
+
 DB_PATH = Path.home() / ".zcode" / "cli" / "db" / "db.sqlite"
 CONFIG_PATH = Path(__file__).parent / "config.json"
 
@@ -890,11 +895,12 @@ def _remote_fetch(force_sids, have_local, rcfg):
     return by, today, err
 
 
-def snapshot(force_sid=""):
+def snapshot(force_sid="", include_quota=False):
     """单次快照：最新会话 + 最近 6+6 会话池 + 今日。
     force_sid：各窗口当前会话 id，逗号分隔（泵按窗口汇总上报：主进程 IPC 映射的焦点会话 +
     overlay localStorage 键兜底），全部强制纳入快照——不在 6+6 池里的会话（新开的、久远的）
-    也能被各窗口找到自己的会话并显示（v32 起；v34 改为多窗口多 sid）。"""
+    也能被各窗口找到自己的会话并显示（v32 起；v34 改为多窗口多 sid）。
+    include_quota：仅 serve 路径传 True；额度为全局量，SSH 远端复用 snapshot 时不携带。"""
     cfg = load_config()
     con = connect()
     try:
@@ -966,7 +972,7 @@ def snapshot(force_sid=""):
                 rec.append(_light_snapshot(con, sid, cfg))
         # rec 建好后把远端快照挂到池首：overlay 按 sid 匹配 mine，顺序只影响兜底展示
         rec = [remote_by[s] for s in reversed(remote_ids)] + rec
-        return {
+        result = {
             "session": base,
             "last_turn": base["last_turn"],
             "last": base["last"],
@@ -986,6 +992,10 @@ def snapshot(force_sid=""):
             "tools": base["tools"],
             "recent": rec,
         }
+        if include_quota and zquota is not None:
+            # 额度为慢变量：cached_payload 只读缓存 + 后台刷新，绝不阻塞本快照
+            result["quota"] = zquota.cached_payload(cfg=cfg)
+        return result
     finally:
         con.close()
 
@@ -1006,7 +1016,7 @@ def serve():
         if not line:
             return
         try:
-            out = json.dumps(snapshot(line.strip()))
+            out = json.dumps(snapshot(line.strip(), include_quota=True))
         except Exception as e:
             out = json.dumps({"error": str(e)[:200]})   # 单次查询失败不杀常驻进程
         sys.stdout.write(out + "\n")
@@ -1027,6 +1037,13 @@ def main(argv):
         # 可选第二参数：强制纳入快照的会话 id，逗号分隔（各窗口当前会话，泵汇总上报）
         force_sid = argv[1] if len(argv) > 1 else ""
         print(json.dumps(snapshot(force_sid)))
+    elif cmd == "quota":
+        if zquota is None:
+            print(json.dumps({"ok": False, "reason": "unsupported",
+                              "message": "额度模块缺失（zquota.py 未随运行时复制）"},
+                             ensure_ascii=False, indent=2))
+        else:
+            print(json.dumps(zquota.get_quota(cfg=load_config()), ensure_ascii=False, indent=2))
     elif cmd == "serve":
         con.close()   # serve 自管连接（每请求新开），退掉 main 预建的这把
         serve()

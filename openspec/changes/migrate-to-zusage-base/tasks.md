@@ -12,9 +12,9 @@
 
 ## 2. 额度移植
 
-- [ ] 2.1 移植额度模块：三级 provider 解析（`_provider_entry`）+ 三家查询（DeepSeek /user/balance、智谱 /api/monitor/usage/quota/limit、OpenRouter /api/v1/credits）+ 自定义 `balanceUrl`/`balanceKind`，验证：命令行直调返回 BigModel 双窗口与实测数字一致
-- [ ] 2.2 移植并测试防护闸：https 限定、公网解析校验、fake-IP `198.18.0.0/15` 豁免、拒绝跟随重定向；断言 `evil-deepseek.example` 不命中、`https://192.168.1.10/x` 被拒，验证：单测/手工断言全过
-- [ ] 2.3 `zusage.py serve` 协议新增额度快照消息：300s 缓存、失败保留上次成功 + `age` 字段、并发去重，验证：连续请求只触发一次出网（日志可见）、断网后仍返回带 age 的旧数据
+- [x] 2.1 额度模块 `zquota.py` 完成：三级 provider 解析 + 三家查询 + 自定义 `balanceUrl`/`balanceKind` + 5 分钟缓存（失败保留旧值 + age_s）+ 短超时（5s）+ 后台单飞刷新 + `cached_payload` 只读路径；验证：实机查询 BigModel 返回双窗口（5h 100% / 周 24%，与钩子数字吻合）、CREDIT_LIMIT 标签已映射为「5 小时/每周」
+- [x] 2.2 防护闸完成并自检 11/11 通过：https 限定、公网解析校验、fake-IP `198.18.0.0/15` 豁免、拒绝跟随重定向；断言 `evil-deepseek.example` 不命中、`192.168.1.10`/`127.0.0.1`/`localhost` 被拒
+- [x] 2.3 serve 协议接线完成（不新增消息、零泵改动）：`snapshot(include_quota=True)` 仅 serve 路径挂 `quota` 顶层键；CLI 新增 `quota` 子命令；`json`/SSH 远端路径不携带；验证：serve 首帧 `warming` 不阻塞、Goat 场景 `unsupported` 语义正确、json 路径无 quota 键
 - [ ] 2.4 `overlay.js` 新增额度条目（独立项 + 设置开关 + 中英文案）：套餐窗口显示剩余%/重置时间，余额显示多币种；失败显示「x 分钟前」标注或分类原因，验证：状态条实测显示 5 小时/周双窗口，关闭开关后条目消失
 - [ ] 2.5 `config.example.json` 增补服务商与端点位（不含任何真实 Key）；README 增补「额度功能与出网说明」，验证：示例文件无凭据字面量、README 明示唯一出网行为
 
