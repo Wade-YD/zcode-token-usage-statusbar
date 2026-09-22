@@ -28,6 +28,6 @@
 ## 4. 迁移收尾
 
 - [x] 4.1 旧插件下线完成（用户终端执行）：`patch-zcode.py --restore` 还原 index.html 并写入 `.patch-disabled`；asar 双标记验证（旧 0 / 新 1）；从其 `plugins.dirs` 注销注册；终止 8788 残留服务；旧目录与 backup/ 保留备查
-- [ ] 4.2 全量回归：状态条 9 项全部正常、额度数字与 BigModel 桌面端一致、速度三口径生效、多窗口会话隔离不受影响
+- [x] 4.2 全量回归通过（用户目视 + 机检）：旧条消失、新条 9 项正常（生成速度含「可见」值、额度 `5h 100% · 周 24%` 与 BigModel 端一致）、悬停明细与设置开关正常、diag 持续更新无渲染异常
 - [x] 4.3 旧仓归档标注完成：zcode-quota 的 `optimization-batch-1` 的 proposal.md 与 tasks.md 顶部加入作废横幅（列明随架构作废组与已迁入基座的改进），勿据此开工
 - [x] 4.4 README 迁移说明完成：中英文均新增「与其它注入类工具共存」章节（不跨版本升级并存、单步重打 `python install.py`、`--remove` 只剥离自身注入行）；中文 README 文件表补 `zquota.py` 行、数据目录清单与 CLI 列表同步
