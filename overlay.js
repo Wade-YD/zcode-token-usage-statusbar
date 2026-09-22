@@ -146,7 +146,7 @@
   /* ---------- 实例工厂（v61.1）：一个 pane 一套 条/面板/气泡/tooltip/定位循环。
    * slot 0 保留 #zusage-bar/#zusage-tip 兼容 id（泵热更新按它清理），其余实例仅类名。 */
   function spawnInstance(pid, slot) {
-    var VERSION = "v62";   // v62：额度条目（套餐剩余/API 余额，三档变色，失败保留上次数据并标注年龄）   // 随提交递增（悬停 ⚙ 面板可见）；未提交的中间迭代不涨号
+    var VERSION = "v63";   // v63：可见文本速度（剔除推理 token）+ 端到端口径标注   // 随提交递增（悬停 ⚙ 面板可见）；未提交的中间迭代不涨号
     /* ---------- 状态（实例级） ---------- */
     var excOn = false,    // 本 pane 会话处于"上下文超限被拒"状态（render 时按 picked 会话计算）
       excGone = false,    // 用户点 ✕ 关闭了本次气泡；超限解除后自动复位
@@ -490,12 +490,17 @@
           L("会话数据实时取自远端机的 ZCode 数据库，「今日合计」亦为远端值", "Session data is fetched live from the remote machine's ZCode database; today's total is the remote value") +
           (d.remote_error ? "\n⚠ " + L("最近一次远端查询失败：", "Last remote query failed: ") + d.remote_error : ""));
       }
-      if (last.tps) {   // 最近一次请求的生成速度，置顶显示；随数值三档变色
+      if (last.tps) {   // 最近一次请求的生成速度；随数值三档变色；有推理拆分时并列可见文本速度
         var tpsCls = last.tps >= 70 ? "ok" : last.tps >= 40 ? "warm" : "hot";
+        var visCls = last.tps_visible >= 70 ? "ok" : last.tps_visible >= 40 ? "warm" : "hot";
         it(ico('<path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/>') +
-          '<span class="' + tpsCls + '">' + last.tps + '</span><span class="dim">t/s</span>',
+          '<span class="' + tpsCls + '">' + last.tps + '</span><span class="dim">t/s</span>' +
+          (last.tps_visible ? '<span class="dim"> / ' + L("可见", "vis") + ' </span><span class="' + visCls + '">' + last.tps_visible + "</span>" : ""),
           L("生成速度：最近完成请求的输出 tokens ÷ 生成耗时（首 token → 完成）\n≥70 t/s 绿色 · 40–70 黄色 · <40 红色",
-            "Generation speed: output tokens ÷ generation time of the latest completed request (first token → completion)\n≥70 t/s green · 40–70 yellow · <40 red"));
+            "Generation speed: output tokens ÷ generation time of the latest completed request (first token → completion)\n≥70 t/s green · 40–70 yellow · <40 red") +
+          (last.tps_visible ? "\n" + L("可见文本速度：剔除思考 token（", "Visible-text speed: excluding thinking tokens (") +
+            (last.reasoning || 0) + L(" 个）后的可见输出 ÷ 同一时间窗", " excluded) ÷ the same time window") : "") +
+          (last.basis === "e2e" ? "\n⚠ " + L("端到端口径：该请求无首字时间，速度含首字等待", "End-to-end basis: no first-token timestamp on this request — the rate includes the first-token wait") : ""));
       }
       if (state.show.quota && d.quota) {
         /* 额度（全局量，不随会话变化；数据由 serve 快照携带，语义见 zquota.py）：
