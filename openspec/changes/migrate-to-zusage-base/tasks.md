@@ -29,5 +29,5 @@
 
 - [ ] 4.1 卸载旧插件：`patch-zcode.py --restore` + 从 `~/.zcode/cli/config.json` 的 `plugins.dirs` 移除 + 停用其 SessionStart 钩子；重启 ZCode，验证：只剩一套状态条、旧插件目录与 backup/ 完整保留备查
 - [ ] 4.2 全量回归：状态条 9 项全部正常、额度数字与 BigModel 桌面端一致、速度三口径生效、多窗口会话隔离不受影响
-- [ ] 4.3 旧仓归档标注：在 zcode-quota 的 `optimization-batch-1` 标注「架构迁移后作废/部分迁入 migrate-to-zusage-base」，避免后续误开工
-- [ ] 4.4 README 增补迁移说明（含「两套注入不得跨版本升级并存」的规则与单步重打命令），验证：文档含重打命令与升级处置规则
+- [x] 4.3 旧仓归档标注完成：zcode-quota 的 `optimization-batch-1` 的 proposal.md 与 tasks.md 顶部加入作废横幅（列明随架构作废组与已迁入基座的改进），勿据此开工
+- [x] 4.4 README 迁移说明完成：中英文均新增「与其它注入类工具共存」章节（不跨版本升级并存、单步重打 `python install.py`、`--remove` 只剥离自身注入行）；中文 README 文件表补 `zquota.py` 行、数据目录清单与 CLI 列表同步

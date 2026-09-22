@@ -82,7 +82,7 @@ Click ⚙ to toggle any bar item, override the context window size, or switch th
   }
   ```
 - **MCP in-chat query**: `token_usage(scope)` supporting current / today / week / days:N / sessions:N / models:days / session:<id prefix> (with per-model and subagent details) / workspace:<dir keyword> (aggregates a workspace's main sessions + subagents, with per-session and per-model details; unmatched keywords return candidate directories).
-- **CLI**: `python zusage.py [now|today|json|quota|days N|sessions [N]|models [days]|workspace <dir keyword>|session <id prefix>|watch]`.
+- **CLI**: `python zusage.py [now|today|json|quota|speed [N]|days N|sessions [N]|models [days]|workspace <dir keyword>|session <id prefix>|watch]`.
 - **/usage command** in the chat input.
 
 ## Installation
@@ -110,6 +110,14 @@ python install.py --remove
 ```
 
 Uninstall does not rely on a backup: it only adds/removes this tool's own injection line inside app.asar, works while ZCode is running (effective after restart), leaves injections added later by other tools untouched, and never "restores" an officially upgraded asar back to an older snapshot.
+
+## Coexisting with other asar injectors
+
+If other tools also patch `app.asar` (e.g. a legacy status-bar injector):
+
+- **Never keep two injections across a ZCode upgrade** — after an upgrade, uninstall one tool completely before re-patching the other, so the two self-heal paths never fight;
+- Single-step re-patch: run `python install.py` again (seconds; no repack unless the injection line changes);
+- Uninstall strips only this tool's own injection line: `python install.py --remove`.
 
 ## Notes
 
