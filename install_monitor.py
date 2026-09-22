@@ -100,14 +100,20 @@ def finalize_tmp():
 
 
 def draw(lines):
-    os.system("cls" if os.name == "nt" else "clear")
+    # ANSI 清屏：不经过 shell（Windows 上 Python 3.6+ 已为控制台开启 VT 处理）
+    print("\x1b[2J\x1b[H", end="")
     print("\n".join(lines), flush=True)
 
 
 def main():
     epoch = float(sys.argv[1]) if len(sys.argv) > 1 else time.time()
     if os.name == "nt":
-        os.system("title " + L("ZCode Token 用量状态栏 - 安装监控", "ZCode Token Usage Status Bar - Install Monitor"))
+        try:  # 不经过 shell 设置窗口标题
+            import ctypes
+            ctypes.windll.kernel32.SetConsoleTitleW(
+                L("ZCode Token 用量状态栏 - 安装监控", "ZCode Token Usage Status Bar - Install Monitor"))
+        except Exception:
+            pass
     pids0 = zcode_pids() or set()   # 启动采集 ≈ 安装时刻的进程集合（install 完成即拉起本窗口）
     t0 = time.time()
     new_since = None

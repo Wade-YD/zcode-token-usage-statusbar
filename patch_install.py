@@ -27,6 +27,7 @@ import re
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -198,9 +199,28 @@ def compute_integrity(data: bytes):
     }
 
 
-def repack(src_path: Path, modify: dict, dst_path: Path):
+def safe_paths(asar_file: Path):
+    """路径校验：返回 (源 asar, 临时写入路径)，写入目标为源同目录的常量文件名。
+
+    三层防护：① 显式拒绝含 ".." 的输入；② 规范化（resolve）；③ 只接受名为
+    app.asar 的现存文件，写入目标限定在其所在目录内（commonpath 包含性校验）。
+    """
+    raw = Path(asar_file)
+    if ".." in raw.parts:
+        raise ValueError(f"refusing path containing '..': {raw}")
+    src = raw.resolve()
+    if src.name != "app.asar" or not src.is_file():
+        raise ValueError(f"refusing non-asar target: {src}")
+    dst = src.parent / "app.asar.zusage.tmp"
+    if ".." in dst.parts or os.path.commonpath([str(src.parent), str(dst)]) != str(src.parent):
+        raise ValueError(f"write target escapes allowed directory: {dst}")
+    return src, dst
+
+
+def repack(src_path: Path, modify: dict):
     """重建 asar。modify: {asar内路径: 新内容bytes}。流式拷贝未改动文件。"""
-    with open(src_path, "rb") as src:
+    src_file, dst_path = safe_paths(src_path)
+    with open(src_file, "rb") as src:
         header, base = read_header(src)
         header = json.loads(json.dumps(header))  # 深拷贝
         nodes = dict(iter_files(header))
@@ -229,12 +249,24 @@ def repack(src_path: Path, modify: dict, dst_path: Path):
         d = len(header_bytes)
         c = (d + 4 + ALIGN - 1) // ALIGN * ALIGN
         b_total = c + 4
-        with open(dst_path, "wb") as out:
-            out.write(struct.pack("<4I", 4, b_total, c, d))
-            out.write(header_bytes)
-            out.write(b"\0" * (c - d - 4))  # pickle 对齐：数据区从 8+b = 12+c 处开始
-            assert out.tell() == 8 + b_total, f"header pad mismatch: {out.tell()} vs {8 + b_total}"
-            out.write(payload)
+        # 写入不经外部路径：mkstemp 在目标目录内创建临时文件（路径由标准库生成），
+        # 保留源文件权限，写满后原子改名为固定临时名供收尾流程使用
+        fd, tmp_name = tempfile.mkstemp(dir=str(src_file.parent), prefix=".app.asar.zusage.")
+        try:
+            os.chmod(tmp_name, src_file.stat().st_mode & 0o777)
+        except OSError:
+            pass
+        try:
+            with os.fdopen(fd, "wb") as out:
+                out.write(struct.pack("<4I", 4, b_total, c, d))
+                out.write(header_bytes)
+                out.write(b"\0" * (c - d - 4))  # pickle 对齐：数据区从 8+b = 12+c 处开始
+                assert out.tell() == 8 + b_total, f"header pad mismatch: {out.tell()} vs {8 + b_total}"
+                out.write(payload)
+        except BaseException:
+            os.unlink(tmp_name)
+            raise
+        os.replace(tmp_name, dst_path)
     return dst_path
 
 
@@ -324,7 +356,7 @@ def install(finalize=False):
         print(L("检测到旧注入行（可能指向旧目录），将替换为新路径。",
                 "Old injection line detected (possibly pointing at an old directory); it will be replaced with the new path."))
     print(L("重打包（307MB，约需十几秒）...", "repacking (307MB, takes ~10-20 seconds)..."))
-    repack(ASAR, {"/" + ENTRY: new_entry}, TMP)
+    repack(ASAR, {"/" + ENTRY: new_entry})
     print(L("结构自检：", "self-check:"))
     if not (self_check(TMP) and syntax_check(TMP)):
         print(L("自检失败，未替换。TMP 保留供排查:", "self-check failed; not replaced. TMP kept for inspection:"), TMP)
@@ -363,7 +395,7 @@ def remove():
         cleanup_legacy_bak()
         return True
     print(L("重打包（剥离注入行，约需十几秒）...", "repacking (stripping the injection line, takes ~10-20 seconds)..."))
-    repack(ASAR, {"/" + ENTRY: stripped}, TMP)
+    repack(ASAR, {"/" + ENTRY: stripped})
     print(L("结构自检：", "self-check:"))
     if not (self_check(TMP, expect=False) and syntax_check(TMP)):
         print(L("自检失败，未替换。TMP 保留供排查:", "self-check failed; not replaced. TMP kept for inspection:"), TMP)
