@@ -1,0 +1,36 @@
+schema: spec-driven
+
+# 项目上下文：AI 创建工件（proposal/specs/design/tasks）时自动可见
+context: |
+  项目：zcode-token-usage-statusbar（内部代号 zusage）——ZCode 桌面客户端（Electron）的 token 用量状态条。
+  仓库定位：基于上游 xhwxt/zcode-token-usage-statusbar（MIT）的自有 fork（GitHub 私有仓库），在其上移植
+  「额度/余额」能力与速度口径改进。
+
+  架构要点（改动前必读）：
+  - 注入面：patch_install.py 在 app.asar 主入口 out/main/index.js 尾部追加一行 dynamic import(loader)；
+    客户端完全退出时才 TMP 原子替换；Electron fuses 已实测关闭
+  - 主进程 loader（inject-main.cjs）：fs.watch 监听 db 目录（300ms 去抖 + 限频），spawn `zusage.py serve`
+    常驻子进程（stdin/stdout JSON 行协议），崩溃自动重启、mtime 变化热重载；stdin EOF 自清理
+  - 渲染面：overlay.js 注入每个窗口（mtime 热更新），按窗口注入 mine（焦点会话）实现多窗口隔离
+  - 数据源：~/.zcode/cli/db/db.sqlite 的 model_usage / turn_usage / tool_usage，全程只读、不联网
+  - 生命周期脚本：install.py / patch_install.py / install_monitor.py（等重启 + diag 回写确认注入）
+
+  移植来源：旧项目 zcode-quota（D:\桌面\私人图书馆\7-工具箱\1-project\zcode-quota，MIT）——
+  额度查询（DeepSeek /user/balance、智谱 /api/monitor/usage/quota/limit、OpenRouter /api/v1/credits）、
+  三级 provider 解析（v2/config.json → provider_config.json 的 providerRules → account:<family> 回落 builtin）、
+  SSRF 防护（https + 解析后公网 + fake-IP 198.18.0.0/15 豁免 + 拒绝跟随重定向）、
+  速度口径改进（只统计 completed、reasoning 拆分出可见文本速度、TTFT 缺失回退标注）
+
+  度量事实（实测）：model_usage 中 reasoningTokens ⊆ outputTokens（totalTokens = inputTokens + outputTokens
+  恒等）；纯解码口径 = output / (completed − first_token)，与上游 zusage 现有公式一致。
+
+  约定：
+  - 保留上游 MIT 署名与来源链接；自有改动用 conventional commits（中文）
+  - 界面文案中英双语（沿用上游 i18n 机制）
+  - 不新增网络监听端口；额度查询是唯一出网行为，必须走防护闸；凭据只从 ~/.zcode 配置读取，不落仓库
+
+rules:
+  proposal:
+    - 明确 asar 写入时机、与旧插件（api-quota）的共存/卸载顺序
+  tasks:
+    - 每个任务给出可独立验证的方式（diag.json / 状态条目视 / 命令行输出）
