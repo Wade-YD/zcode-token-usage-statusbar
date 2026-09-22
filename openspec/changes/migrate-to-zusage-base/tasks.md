@@ -4,10 +4,10 @@
 
 ## 1. 仓库与试装
 
-- [ ] 1.1 `git fetch --unshallow` 补全上游历史；添加 `upstream` remote 指向 xhwxt/zcode-token-usage-statusbar；提交本 change 的 openspec 工件（config.yaml + changes/），验证：`git log --oneline | wc -l` 为完整历史、`git remote -v` 含 upstream
-- [ ] 1.2 新建 GitHub 私有仓库并推送（`gh repo create --private --source=. --push`），验证：`gh repo view --json visibility` 返回 PRIVATE，README/LICENSE 上游署名完整
-- [ ] 1.3 试装新基座：运行安装流程（客户端关闭时完成 asar 原子替换）→ 重启 ZCode，验证：状态条出现且 8 项可切换、运行时目录 diag 文件出现 pushCount≥1、注入链路确认
-- [ ] 1.4 在迁移窗口内记录旧插件状态（`patch-zcode.py --check` 仍为已注入，额度在旧状态条可见），作为迁移期兜底基线
+- [x] 1.1 `git fetch --unshallow` 补全上游历史（61 提交）；`origin`→`upstream` 改名；本 change 工件已提交，验证：`git log --oneline | wc -l`=61、`git remote -v` 含 upstream
+- [x] 1.2 新建 GitHub 私有仓库并推送（`Wade-YD/zcode-token-usage-statusbar`，private=true，全量历史；API 建仓——gh CLI 未安装、curl 中文描述曾致 JSON 解析失败，改 ASCII 描述解决）
+- [ ] 1.3 试装新基座：**需用户在自有终端执行**（harness 安全钩子拦截 asar 写入的自动化执行）：`cd D:\桌面\私人图书馆\7-工具箱\1-project\zcode-token-usage-statusbar && python install.py` → 若 asar 被运行中的 ZCode 占用将弹监控窗、完全退出 ZCode 后自动完成替换 → 重启 ZCode 验证状态条与 diag 回写
+- [x] 1.4 旧插件基线已记录：`patch-zcode.py --check` = 已注入、index.html 26614 字节 @ 316719209、backup 存在、asar 可写
 - [x] 1.5 上游安全告警加固（基座引入时随修）：`install_monitor.py` 两处 `os.system` 改无 shell 写法（ANSI 清屏 / `SetConsoleTitleW`）、`patch_install.py` 的 asar 重建写入限同目录、`zusage.py` SSH 远端 script/python 参数白名单；验证：Mimosa 项目扫描通过、`zusage.py now` 冒烟正常
 
 ## 2. 额度移植
