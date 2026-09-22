@@ -798,10 +798,16 @@ def _remote_cfg(cfg):
             ssh_argv = str(ssh).split()
     if not ssh_argv:
         return None
+    # 远端命令由 ssh 转发给远端 shell 执行：script/python 走白名单，杜绝参数注入
+    safe_arg = re.compile(r"^[A-Za-z0-9._/~:@+-]+$")
+    script = str(r.get("script") or ".zcode/zcode-token-usage-statusbar/zusage.py")
+    py = str(r.get("python") or "python3")
+    if not safe_arg.match(script) or not safe_arg.match(py):
+        return None
     return {
         "ssh_argv": ssh_argv,
-        "script": str(r.get("script") or ".zcode/zcode-token-usage-statusbar/zusage.py"),
-        "python": str(r.get("python") or "python3"),
+        "script": script,
+        "python": py,
         "timeout_s": min(14.0, max(1.0, float(r.get("timeout_s") or 6))),
         "host_label": str(r.get("host_label") or (ssh_argv[-1] if len(ssh_argv) > 1 else "remote")),
     }
