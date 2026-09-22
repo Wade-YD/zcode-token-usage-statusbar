@@ -33,12 +33,15 @@ def tool_token_usage(scope: str = "current") -> str:
         if scope.startswith("models"):
             d = int(scope.split(":", 1)[1]) if ":" in scope else 7
             return zusage.render_models(con, d)
+        if scope.startswith("speed"):
+            n = int(scope.split(":", 1)[1]) if ":" in scope else 10
+            return json.dumps(zusage.speed_stats(con, window=n), ensure_ascii=False, indent=2)
         if scope.startswith("session:"):
             return zusage.render_session_detail(con, scope.split(":", 1)[1].strip())
         if scope.startswith("workspace:"):
             return zusage.render_workspace(con, scope.split(":", 1)[1].strip())
-        return L(f"未知 scope: {scope!r}。可用: current | today | week | days:N | sessions[:N] | models[:days] | session:<id前缀> | workspace:<目录关键词>",
-                 f"Unknown scope: {scope!r}. Available: current | today | week | days:N | sessions[:N] | models[:days] | session:<id prefix> | workspace:<dir keyword>")
+        return L(f"未知 scope: {scope!r}。可用: current | today | week | days:N | sessions[:N] | models[:days] | speed[:N] | session:<id前缀> | workspace:<目录关键词>",
+                 f"Unknown scope: {scope!r}. Available: current | today | week | days:N | sessions[:N] | models[:days] | speed[:N] | session:<id prefix> | workspace:<dir keyword>")
     finally:
         con.close()
 
@@ -49,11 +52,11 @@ TOOLS = [
         "description": (
             L("查询 ZCode 的 token 用量（数据来自本地 db.sqlite，只读）。"
               "scope 可选: current(当前会话+今日,默认), today, week, days:N(近N天每日), "
-              "sessions:N(最近N个会话), models:days(按模型), session:<id前缀>(指定会话,含按模型与子代理明细), "
+              "sessions:N(最近N个会话), models:days(按模型), speed[:N](最近N次调用速度,含口径与覆盖率), session:<id前缀>(指定会话,含按模型与子代理明细), "
               "workspace:<目录关键词>(按工作区聚合主会话+子代理,含按会话与按模型明细)。",
               "Query ZCode token usage (from the local db.sqlite, read-only). "
               "scope: current(current session+today, default), today, week, days:N(last N days per day), "
-              "sessions:N(last N sessions), models:days(by model), session:<id prefix>(specific session, with per-model and subagent details), "
+              "sessions:N(last N sessions), models:days(by model), speed[:N](speed of last N calls, with basis and coverage), session:<id prefix>(specific session, with per-model and subagent details), "
               "workspace:<dir keyword>(aggregate a workspace's main sessions+subagents, with per-session and per-model details).")
         ),
         "inputSchema": {

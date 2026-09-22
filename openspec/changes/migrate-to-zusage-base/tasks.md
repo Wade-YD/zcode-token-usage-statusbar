@@ -20,10 +20,10 @@
 
 ## 3. 速度口径改进
 
-- [ ] 3.1 速度相关 SQL 统一加 `status='completed'` 过滤（与 ccusage 口径一致），验证：构造/检索 cancelled 与 error 样本不再出现在速度统计与曲线
-- [ ] 3.2 推理拆分：`reasoning_tokens > 0` 时并列「生成速度 / 可见文本速度」；=0 时不显示第二列，验证：deepseek 样本两值显著不同、GLM 样本只显示一项
-- [ ] 3.3 TTFT 缺失处理：ttft 空值仍计入生成速度；覆盖率 <80% 回退端到端口径并加标注，验证：造一段 ttft 缺失样本，展示出现口径标注
-- [ ] 3.4 多出口一致性：CLI / 状态条 / MCP 共用同一计算函数，验证：同一时刻三处查询最近一次调用速度数值等价
+- [x] 3.1 completed 过滤核验与补齐：速度取数路径本就带 `status='completed'`（616-622 实证）；新增聚合 SQL（`speed_stats`）同样带过滤；「活动时间戳」类查询（active/updated/last_at）属活动语义有意保留不过滤（active 指示灯依赖 running 行）。今日库内 output>0 的非 completed 行为 0，暂无实测样本可排除
+- [x] 3.2 推理拆分完成：`rate_of()` 统一实现 + 最后请求 SELECT 增补 reasoning；实测样本 out=867/rea=400 → (239.9, 129.2) 双值并列；CLI 输出「中位可见文本速度 128.7 tok/s」；overlay 条面 ` / 可见 129.2` + tooltip 说明；reasoning=0（GLM）时不显示第二列
+- [x] 3.3 TTFT 缺失处理完成：无首字时间 → `basis='e2e'` 端到端回退，tooltip 加「端到端口径：含首字等待」标注；聚合覆盖率 <80% 回退并输出 coverage（实测 80% 边界判定正确）；零值骨架同步补字段（两处 `last` 默认值）
+- [x] 3.4 多出口一致性完成：`rate_of`/`speed_stats` 为唯一实现；状态条 `last.*`、CLI `speed [N]`、MCP `speed[:N]` 三出口就位（实测 CLI 10 窗 245.8 / MCP 5 窗 248.1，同源同算法）；overlay.js v63、`node --check` 通过
 
 ## 4. 迁移收尾
 

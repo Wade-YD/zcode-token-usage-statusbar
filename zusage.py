@@ -8,6 +8,7 @@ import json
 import re
 import shlex
 import sqlite3
+import statistics
 import subprocess
 import sys
 import time
@@ -602,7 +603,8 @@ def _light_snapshot(con, sid, cfg):
                 "reasoning": 0, "cache_write": 0, "active": False, "list": []},
         "tools": {"total": u["tool_calls"], "errors": 0, "list": []},
         "last_turn": dict(_EMPTY_TURN),
-        "last": {"duration_ms": 0, "ttft_ms": 0, "model": "", "tps": 0},
+        "last": {"duration_ms": 0, "ttft_ms": 0, "model": "", "tps": 0,
+                 "tps_visible": None, "reasoning": 0, "basis": None},
         "code": {"add": (srow["summary_additions"] if srow is not None else None),
                  "del": (srow["summary_deletions"] if srow is not None else None),
                  "files": (srow["summary_files"] if srow is not None else None)},
@@ -614,13 +616,73 @@ def _light_snapshot(con, sid, cfg):
     }
 
 
+def rate_of(row):
+    """单次调用的速度分解（状态条 / CLI / MCP 共用的唯一实现）。
+
+    row = (output_tokens, reasoning_tokens, duration_ms, first_token_at, completed_at)
+    返回 (tps, tps_visible, basis)：
+      tps         生成速度 = output ÷（首 token → 完成）；无首字时间时退化为端到端（总耗时）
+      tps_visible 可见文本速度 =（output − reasoning）÷ 同一时间窗；reasoning=0 时为 None
+      basis       'decode'（有首字时间）/ 'e2e'（端到端回退）/ None（数据不足）
+    """
+    out, rea, dur, fta, ca = row
+    if not out:
+        return (None, None, None)
+    if fta and ca and ca > fta:
+        gen, basis = (ca - fta) / 1000.0, "decode"
+    elif dur:
+        gen, basis = dur / 1000.0, "e2e"
+    else:
+        return (None, None, None)
+    tps = round(out / gen, 1)
+    vis = round((out - rea) / gen, 1) if rea and out > rea else None
+    return (tps, vis, basis)
+
+
+def speed_stats(con, sid=None, window=10, min_coverage=0.8):
+    """最近 window 次 completed 调用的聚合速度（与状态条、CLI 共用同一实现）。
+
+    解码样本（有首字时间）占比 ≥ min_coverage 时给出中位纯解码速度；否则回退端到端
+    口径并在 basis 中标注，绝不静默混用两种口径。
+    """
+    where = " and session_id=?" if sid else ""
+    params = (sid, window) if sid else (window,)
+    rows = con.execute(
+        f"""select output_tokens, coalesce(reasoning_tokens,0), duration_ms,
+                   first_token_at, completed_at
+            from model_usage where status='completed' and output_tokens>0{where}
+            order by completed_at desc limit ?""", params).fetchall()
+    dec, e2e, vis, ttfts = [], [], [], []
+    for r in rows:
+        tps, tv, basis = rate_of(r)
+        if tps is None:
+            continue
+        (dec if basis == "decode" else e2e).append(tps)
+        if tv is not None:
+            vis.append(tv)
+        if r[4] and r[3] and r[4] > r[3]:
+            ttfts.append(r[4] - r[3])
+    samples = len(rows)
+    coverage = (len(dec) / samples) if samples else 0.0
+    basis = "decode" if coverage >= min_coverage else "e2e"
+    pool = dec if basis == "decode" else (e2e or dec)
+    return {
+        "samples": samples,
+        "basis": basis,
+        "coverage": round(coverage, 2),
+        "median_tps": (round(statistics.median(pool), 1) if pool else None),
+        "median_tps_visible": (round(statistics.median(vis), 1) if vis else None),
+        "median_ttft_ms": (int(statistics.median(ttfts)) if ttfts else None),
+    }
+
+
 def _session_snapshot(con, sid, cfg):
     """单个会话的完整快照（最新会话与 recent 列表共用一份结构）。"""
     srow = con.execute("select * from session where id=?", (sid,)).fetchone()
     u = session_usage(con, sid)
     last = con.execute(
         """select duration_ms, coalesce(time_to_first_token_ms,0), completed_at, turn_id, model_id,
-                  output_tokens, first_token_at
+                  output_tokens, first_token_at, coalesce(reasoning_tokens,0) as reasoning_tokens
            from model_usage where session_id=? and status='completed'
            order by completed_at desc limit 1""",
         (sid,),
@@ -661,16 +723,14 @@ def _session_snapshot(con, sid, cfg):
     lr = con.execute("select max(completed_at) from model_usage where session_id=?", (sid,)).fetchone()
     active = bool(lr and lr[0] and int(time.time() * 1000) - lr[0] < SESSION_TIMEOUT_MS)
     ctx_auto = lookup_context_window(last["model_id"]) if last else None
-    # 生成速度：输出 token ÷ 生成耗时（首 token 之后到完成；无 first_token_at 时退化为总耗时）
-    tps = 0
+    # 生成速度：输出 token ÷ 生成耗时（首 token 之后到完成；无 first_token_at 时退化端到端）。
+    # 与 CLI/MCP 聚合口径共用 rate_of() 同一实现（spec: speed-metrics 多出口一致）。
+    tps, tps_visible, speed_basis = (0, None, None)
     if last and last["output_tokens"]:
-        gen_ms = None
-        if last["first_token_at"] and last["completed_at"] and last["completed_at"] > last["first_token_at"]:
-            gen_ms = last["completed_at"] - last["first_token_at"]
-        elif last["duration_ms"]:
-            gen_ms = last["duration_ms"]
-        if gen_ms:
-            tps = round(last["output_tokens"] / (gen_ms / 1000), 1)
+        tps, tps_visible, speed_basis = rate_of(
+            (last["output_tokens"], last["reasoning_tokens"], last["duration_ms"],
+             last["first_token_at"], last["completed_at"]))
+        tps = tps or 0
     sub_rows = con.execute(
         """select m.session_id, coalesce(m.agent,''), coalesce(s2.title,''), count(*),
                   coalesce(sum(m.computed_total_tokens),0),
@@ -747,6 +807,9 @@ def _session_snapshot(con, sid, cfg):
             "ttft_ms": last[1] if last else 0,
             "model": last["model_id"] if last else "",
             "tps": tps,
+            "tps_visible": tps_visible,      # 可见文本速度（剔除推理 token）；reasoning=0 时为 None
+            "reasoning": (last["reasoning_tokens"] if last else 0) or 0,
+            "basis": speed_basis,            # 'decode' | 'e2e' | None；端到端回退时 UI 需标注口径
         },
         # 代码变更统计（session 表 summary_* 列，ZCode 目前未填充、全库为 NULL，有值才会显示）
         "code": {
@@ -939,7 +1002,8 @@ def snapshot(force_sid="", include_quota=False):
                     "input": 0, "output": 0, "reasoning": 0, "cache_read": 0, "cache_write": 0,
                     "total": 0, "tool_calls": 0, "retries": 0, "ctx": 0, "updated": "",
                     "last_turn": dict(_EMPTY_TURN),
-                    "last": {"duration_ms": 0, "ttft_ms": 0, "model": "", "tps": 0},
+                    "last": {"duration_ms": 0, "ttft_ms": 0, "model": "", "tps": 0,
+                             "tps_visible": None, "reasoning": 0, "basis": None},
                     "code": {"add": None, "del": None, "files": None}, "ctx_exc": 0,
                     "tools": {"total": 0, "errors": 0, "list": []},
                     "sub": {"requests": 0, "total": 0, "input": 0, "output": 0, "cache_read": 0,
@@ -1044,6 +1108,24 @@ def main(argv):
                              ensure_ascii=False, indent=2))
         else:
             print(json.dumps(zquota.get_quota(cfg=load_config()), ensure_ascii=False, indent=2))
+    elif cmd == "speed":
+        n = int(argv[1]) if len(argv) > 1 and argv[1].isdigit() else 10
+        s = speed_stats(con, window=n)
+        print(L("生成速度（最近 %d 次完成调用）" % s["samples"],
+                "Generation speed (%d most recent completed calls)" % s["samples"]))
+        print(L("  口径：%s（解码样本占比 %d%%）" % (
+                    "纯解码（首字后）" if s["basis"] == "decode" else "端到端（含首字等待）",
+                    round(s["coverage"] * 100)),
+                "  basis: %s (decode coverage %d%%)" % (s["basis"], round(s["coverage"] * 100))))
+        if s["median_tps"] is not None:
+            print(L("  中位生成速度   %.1f tok/s" % s["median_tps"],
+                    "  median rate    %.1f tok/s" % s["median_tps"]))
+        if s["median_tps_visible"] is not None:
+            print(L("  中位可见文本速度 %.1f tok/s（剔除推理 token）" % s["median_tps_visible"],
+                    "  median visible %.1f tok/s (thinking excluded)" % s["median_tps_visible"]))
+        if s["median_ttft_ms"] is not None:
+            print(L("  中位首字延迟   %d ms" % s["median_ttft_ms"],
+                    "  median TTFT    %d ms" % s["median_ttft_ms"]))
     elif cmd == "serve":
         con.close()   # serve 自管连接（每请求新开），退掉 main 预建的这把
         serve()
