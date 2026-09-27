@@ -56,7 +56,7 @@ Token usage of background sub-agents in the current session, tracked separately 
 
 ### ⑧ Quota
 
-Plan remaining or API balance, resolved automatically from the provider of your latest request (DeepSeek / Z.ai · BigModel / OpenRouter). Plans show the 5-hour and weekly windows with remaining percentage (three-tier colors) and reset times; balances show per-currency amounts. Cached for about 5 minutes; when a refresh fails the last data is kept and annotated with its age ("x min ago"). Relay services can expose a custom endpoint via `balanceUrl` / `balanceKind` in `~/.zcode/v2/provider_config.json`. Quota is the only outbound request and can be switched off in the ⚙ panel.
+Plan remaining or API balance, resolved automatically from the provider of your latest request (DeepSeek / Z.ai · BigModel / OpenRouter). Plans show the 5-hour and weekly windows with remaining percentage (three-tier colors) and reset times; balances show per-currency amounts. Cached for about 5 minutes; when a refresh fails the last data is kept and annotated with its age ("x min ago"). Relay services can expose a custom endpoint via `balanceUrl` / `balanceKind` in `~/.zcode/v2/provider_config.json`. Quota is the only outbound request: the ⚙ panel's “Network → Quota network queries” switch stops/restores it instantly (hiding the item too); `quota.enabled: false` in config.json disables it at file level.
 
 ### ⑨ Settings Panel
 

@@ -54,3 +54,14 @@ TBD - created by archiving change migrate-to-zusage-base. Update Purpose after a
 - **WHEN** 当前服务商无内置分支且未配置 balanceUrl
 - **THEN** 显示「暂不支持自动查询」类提示，而非「查询失败」
 
+### Requirement: 额度出网总开关
+额度联网查询 MUST 可由用户在设置面板一键停止/恢复（「出网 → 额度联网查询」）；关闭时 MUST 立即停止一切额度相关的出站请求与后台刷新，且额度条目同时隐藏；开关状态 MUST 持久化，并经泵查询通道实时下发（无需重启客户端）。config.json 的 `quota.enabled: false` MUST 提供等效的文件级关闭。
+
+#### Scenario: 面板关闭出网
+- **WHEN** 用户在设置面板取消勾选「额度联网查询」
+- **THEN** 后续快照不再携带额度数据、无任何出站请求，条目同时消失；重新勾选后额度自动恢复（缓存冷启动时先显示预热态）
+
+#### Scenario: 文件级关闭
+- **WHEN** config.json 设置 `quota.enabled: false`
+- **THEN** 额度查询模块对所有调用返回 disabled，不发起网络请求
+

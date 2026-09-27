@@ -255,7 +255,8 @@ function legacySpawn(wants) {
   /* wants：各窗口当前会话 id（逗号分隔）。全部强制纳入快照，共享池里包含每个窗口
    * 自己的会话；zusage.py 逐个白名单校验。泵侧整体格式白名单防注入。 */
   const args = [path.join(HERE, "zusage.py"), "json"];
-  if (wants && /^[A-Za-z0-9_,-]{1,600}$/.test(wants)) args.push(wants);
+  const sidsArg = String(wants || "").replace(/^q[01];/, "");   // 兼容带出网前缀的行（json 路径无额度）
+  if (sidsArg && /^[A-Za-z0-9_,-]{1,600}$/.test(sidsArg)) args.push(sidsArg);
   const py = spawn(readCfg().python_path, args, { windowsHide: true });
   let out = "";
   /* 兜底：查询进程 15 秒不退出按挂死杀掉，close 事件照常触发，busy 不会永久卡住 */
@@ -296,19 +297,24 @@ function maybeSpawn() {
   const withTimeout = (p, ms) => Promise.race([p, new Promise((r) => setTimeout(() => r(""), ms))]);
   /* 各窗口的 pane 会话 id（v10，__zusageWantSids 数组，分屏多实例状态条用）+ 旧单值兜底。
    * v8 曾在 mine 模式跳过页面求值；分屏后每 pane 有自己的会话，必须读回数组才能全部纳入快照。 */
-  const readWantsJs = "(function(){var a=window.__zusageWantSids;if(!a||!a.length){a=window.__zusageWantSid?[window.__zusageWantSid]:[]}return JSON.stringify(a)})()";
+  const readWantsJs = "(function(){var a=window.__zusageWantSids;if(!a||!a.length){a=window.__zusageWantSid?[window.__zusageWantSid]:[]}return JSON.stringify({s:a,q:window.__zusageQuotaNet!==false})})()";
   Promise.all(wcs.map((wc) => withTimeout(wc.executeJavaScript(readWantsJs, true).catch(() => "[]"), 1000)))
     .then((vals) => {
       /* 汇总全部窗口的全部 pane 会话（去重）：mine（窗口焦点会话）优先，pane 会话随后 */
       const wants = [];
+      let quotaNet = true;   // 额度是全局量：任一窗口关闭出网即整体关闭（q0;/q1; 前缀随行下发）
       const push = (sid) => { if (sid && /^[A-Za-z0-9_-]{1,80}$/.test(sid) && !wants.includes(sid)) wants.push(sid); };
       wcs.forEach((wc, i) => {
         if (activeSid.has(wc.id)) push(activeSid.get(wc.id) || "");
-        let arr = [];
-        try { arr = JSON.parse(vals[i] || "[]"); } catch (e) { }
-        if (Array.isArray(arr)) arr.forEach(push);
+        let v = null;
+        try { v = JSON.parse(vals[i] || "null"); } catch (e) { }
+        if (Array.isArray(v)) v = { s: v, q: true };   // 旧 overlay 兼容（裸数组）
+        if (v && typeof v === "object") {
+          if (v.q === false) quotaNet = false;
+          if (Array.isArray(v.s)) v.s.forEach(push);
+        }
       });
-      const key = wants.join(",");
+      const key = (quotaNet ? "q1;" : "q0;") + wants.join(",");
       /* v9：聚焦 SSH 远程会话时本地 db 不写入（st 恒定），短路径放行、改按 remote 轮询间隔 */
       const remoteActive = wants.some((s) => remoteSids.has(s));
       if (key === lastWants && st && st === lastStamp && !remoteActive) return;   // 会话与数据都没变：零进程
