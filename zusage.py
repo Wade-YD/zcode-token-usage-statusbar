@@ -958,12 +958,13 @@ def _remote_fetch(force_sids, have_local, rcfg):
     return by, today, err
 
 
-def snapshot(force_sid="", include_quota=False):
+def snapshot(force_sid="", include_quota=False, quota_enabled=True):
     """单次快照：最新会话 + 最近 6+6 会话池 + 今日。
     force_sid：各窗口当前会话 id，逗号分隔（泵按窗口汇总上报：主进程 IPC 映射的焦点会话 +
     overlay localStorage 键兜底），全部强制纳入快照——不在 6+6 池里的会话（新开的、久远的）
     也能被各窗口找到自己的会话并显示（v32 起；v34 改为多窗口多 sid）。
-    include_quota：仅 serve 路径传 True；额度为全局量，SSH 远端复用 snapshot 时不携带。"""
+    include_quota：仅 serve 路径传 True；额度为全局量，SSH 远端复用 snapshot 时不携带。
+    quota_enabled：面板「额度联网查询」总开关；False 时 quota 键整键不出现（条目随之隐藏）。"""
     cfg = load_config()
     con = connect()
     try:
@@ -1056,8 +1057,9 @@ def snapshot(force_sid="", include_quota=False):
             "tools": base["tools"],
             "recent": rec,
         }
-        if include_quota and zquota is not None:
-            # 额度为慢变量：cached_payload 只读缓存 + 后台刷新，绝不阻塞本快照
+        if include_quota and quota_enabled and zquota is not None:
+            # 额度为慢变量：cached_payload 只读缓存 + 后台刷新，绝不阻塞本快照；
+            # quota_enabled=False（出网总开关关闭）时整键不出现，条目随之隐藏
             result["quota"] = zquota.cached_payload(cfg=cfg)
         return result
     finally:
@@ -1080,7 +1082,15 @@ def serve():
         if not line:
             return
         try:
-            out = json.dumps(snapshot(line.strip(), include_quota=True))
+            raw = line.strip()
+            # 额度出网总开关（泵协议扩展）：行首 q0;/q1; 前缀由泵按渲染端开关注入；
+            # 无前缀 = 旧泵/旧 overlay，默认允许出网（向后兼容）
+            quota_on = True
+            if raw.startswith("q0;"):
+                quota_on, raw = False, raw[3:]
+            elif raw.startswith("q1;"):
+                raw = raw[3:]
+            out = json.dumps(snapshot(raw, include_quota=True, quota_enabled=quota_on))
         except Exception as e:
             out = json.dumps({"error": str(e)[:200]})   # 单次查询失败不杀常驻进程
         sys.stdout.write(out + "\n")

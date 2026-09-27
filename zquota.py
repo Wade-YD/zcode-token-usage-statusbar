@@ -359,6 +359,9 @@ def _background_refresh(key: str | None) -> None:
 
 def get_quota(provider_id: str | None = None, cfg: dict | None = None) -> dict:
     """额度快照，永不抛出。语义见模块 docstring。"""
+    if ((cfg or {}).get("quota") or {}).get("enabled") is False:
+        return {"ok": False, "reason": "disabled", "provider_name": None,
+                "message": "额度查询已关闭（quota.enabled=false）", "age_s": None}
     pid = provider_id or latest_provider_id()
     ttl = max(30, int(((cfg or {}).get("quota") or {}).get("ttl_s") or DEFAULT_TTL_S))
     now = time.monotonic()
@@ -401,7 +404,11 @@ def cached_payload(provider_id: str | None = None, cfg: dict | None = None) -> d
 
     有缓存（无论新旧）→ 返回缓存数据 + age_s；无缓存且未在后台刷新 → 触发一次
     后台预热并返回 {ok:False, reason:'warming', ...}。
+    config quota.enabled=false 时返回 disabled，不触网、不起线程。
     """
+    if ((cfg or {}).get("quota") or {}).get("enabled") is False:
+        return {"ok": False, "reason": "disabled", "provider_name": None,
+                "message": "额度查询已关闭（quota.enabled=false）", "age_s": None}
     global _inflight
     pid = provider_id or latest_provider_id()
     ttl = max(30, int(((cfg or {}).get("quota") or {}).get("ttl_s") or DEFAULT_TTL_S))
