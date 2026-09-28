@@ -35,12 +35,11 @@
   } catch (e) { }
 
   /* ---------- 共享状态（多实例一致）：显示项/语言/上下文覆盖/最近一次数据 ---------- */
-  var LS = { show: "zusage3.show", ctxOv: "zusage3.ctxOv", lang: "zusage3.lang", quotaNet: "zusage3.quotaNet" };
+  var LS = { show: "zusage3.show", ctxOv: "zusage3.ctxOv", lang: "zusage3.lang" };
   var state = {
     show: { win: 1, ctx: 1, today: 1, turn: 1, sub: 1, tools: 1, quota: 1 },
     ctxOv: "", data: null,
     lang: "zh",
-    quotaNet: true,   // 额度出网总开关：false = 不请求余额/套餐接口（额度条目同时隐藏）
   };
   /* ---------- i18n（v57）：L(中文, English) 内联双语文案，语言存 localStorage ---------- */
   function L(zh, en) { return state.lang === "en" ? en : zh; }
@@ -53,15 +52,13 @@
     }
     state.ctxOv = ls(LS.ctxOv, "");
     if (ls(LS.lang, "") === "en") state.lang = "en";
-    state.quotaNet = ls(LS.quotaNet, "1") !== "0";
   } catch (e) { }
-  window.__zusageQuotaNet = state.quotaNet;   // 泵下次拉取时经 wants 求值读走（q0;/q1; 前缀）
+  window.__zusageQuotaNet = !!state.show.quota;   // 条目开关即出网开关；泵下次拉取经 wants 求值读走（q0;/q1; 前缀）
   function persist() {
     lsSet(LS.show, JSON.stringify(state.show));
     lsSet(LS.ctxOv, state.ctxOv);
     lsSet(LS.lang, state.lang);
-    lsSet(LS.quotaNet, state.quotaNet ? "1" : "0");
-    window.__zusageQuotaNet = state.quotaNet;
+    window.__zusageQuotaNet = !!state.show.quota;
   }
 
   /* ---------- 多实例注册表（v61.1）：每个分屏 pane 一个条实例 ---------- */
@@ -151,7 +148,7 @@
   /* ---------- 实例工厂（v61.1）：一个 pane 一套 条/面板/气泡/tooltip/定位循环。
    * slot 0 保留 #zusage-bar/#zusage-tip 兼容 id（泵热更新按它清理），其余实例仅类名。 */
   function spawnInstance(pid, slot) {
-    var VERSION = "v64";   // v64：额度出网总开关（⚙ 面板一键停止/恢复额度联网查询）   // 随提交递增（悬停 ⚙ 面板可见）；未提交的中间迭代不涨号
+    var VERSION = "v65";   // v65：额度开关合并——条目开关即出网开关（一个勾选管显示与联网）   // 随提交递增（悬停 ⚙ 面板可见）；未提交的中间迭代不涨号
     /* ---------- 状态（实例级） ---------- */
     var excOn = false,    // 本 pane 会话处于"上下文超限被拒"状态（render 时按 picked 会话计算）
       excGone = false,    // 用户点 ✕ 关闭了本次气泡；超限解除后自动复位
@@ -320,7 +317,7 @@
       '<label><input type="checkbox" data-k="tools"><span>' + L("工具调用", "Tool calls") + '<em>' + L("当前会话，悬停看各工具明细与错误", "per-session, hover for per-tool details and errors") + '</em></span></label>' +
       '<label><input type="checkbox" data-k="today"><span>' + L("今日合计", "Today's total") + '<em>' + L("今天所有会话的消耗", "consumption of all sessions today") + '</em></span></label>' +
       '<label><input type="checkbox" data-k="sub"><span>' + L("子代理", "Sub-agents") + '<em>' + L("后台子代理消耗，点击条目看明细面板", "background sub-agent usage, click the item for the detail panel") + '</em></span></label>' +
-      '<label><input type="checkbox" data-k="quota"><span>' + L("额度", "Quota") + '<em>' + L("套餐剩余（5 小时/周）或 API 余额；约 5 分钟刷新一次", "plan remaining (5h/weekly) or API balance; refreshes about every 5 min") + '</em></span></label>' +
+      '<label><input type="checkbox" data-k="quota"><span>' + L("额度", "Quota") + '<em>' + L("套餐剩余（5 小时/周）或 API 余额；开启即联网查询（约 5 分钟一次）", "plan remaining (5h/weekly) or API balance; ON = queries the provider about every 5 min") + '</em></span></label>' +
       '<div class="hr"></div>' +
       '<div class="cap">' + L("上下文窗口", "Context window") + '</div>' +
       '<label><input type="text" class="zu-ctxov" placeholder="' + L("自动(按模型)", "auto") + '"><span class="dim">' + L("留空 = 自动（原生UI > 模型目录）", "leave empty = auto (native UI > model catalog)") + '</span></label>' +
@@ -328,9 +325,6 @@
       '<div class="cap">Language / 语言</div>' +
       '<label><input type="radio" name="zu-lang" value="zh"><span>中文</span></label>' +
       '<label><input type="radio" name="zu-lang" value="en"><span>English</span></label>' +
-      '<div class="hr"></div>' +
-      '<div class="cap">' + L("出网", "Network") + '</div>' +
-      '<label><input type="checkbox" data-q="quotaNet"><span>' + L("额度联网查询", "Quota network queries") + '<em>' + L("关闭 = 不请求余额/套餐接口，额度条目同时隐藏", "off = no balance/plan requests; the quota item is hidden as well") + '</em></span></label>' +
       '<div class="hr"></div>' +
       '<div class="pnote">' + L("悬停条面各项看明细；点击子代理项看全部明细面板。数据源 ~/.zcode/cli/db/db.sqlite（只读），请求完成后才落库，数值随上次完成请求变化。",
         "Hover bar items for details; click the sub-agent item for the full detail panel. Data source ~/.zcode/cli/db/db.sqlite (read-only); rows are written when requests complete, numbers follow the latest completed request.") + '</div>';
@@ -340,8 +334,7 @@
       /* 重建后回填全部控件状态（语言切换路径不走 syncPanel）：checkbox 按 state.show、
          上下文窗口输入框按 state.ctxOv——否则切语言后勾选态清空、首次点击语义反转 */
       panel.querySelectorAll("input[type=checkbox]").forEach(function (cb) {
-        if (cb.dataset.q === "quotaNet") cb.checked = state.quotaNet;
-        else cb.checked = !!state.show[cb.dataset.k];
+        cb.checked = !!state.show[cb.dataset.k];
       });
       var ovInput = panel.querySelector(".zu-ctxov");
       if (ovInput) ovInput.value = state.ctxOv;
@@ -511,7 +504,7 @@
             (last.reasoning || 0) + L(" 个）后的可见输出 ÷ 同一时间窗", " excluded) ÷ the same time window") : "") +
           (last.basis === "e2e" ? "\n⚠ " + L("端到端口径：该请求无首字时间，速度含首字等待", "End-to-end basis: no first-token timestamp on this request — the rate includes the first-token wait") : ""));
       }
-      if (state.show.quota && state.quotaNet && d.quota) {
+      if (state.show.quota && d.quota) {
         /* 额度（全局量，不随会话变化；数据由 serve 快照携带，语义见 zquota.py）：
          * 套餐显示各窗口剩余%（三档变色），余额显示币种金额；刷新失败保留上次数据并标注年龄 */
         var q = d.quota, qv = null, qt = null;
@@ -956,8 +949,7 @@
     /* ---------- 设置面板 ---------- */
     function syncPanel() {
       panel.querySelectorAll("input[type=checkbox]").forEach(function (cb) {
-        if (cb.dataset.q === "quotaNet") cb.checked = state.quotaNet;
-        else cb.checked = !!state.show[cb.dataset.k];
+        cb.checked = !!state.show[cb.dataset.k];
       });
       panel.querySelector(".zu-ctxov").value = state.ctxOv;
     }
@@ -982,13 +974,8 @@
         return;
       }
       if (t2.type === "checkbox") {
-        if (t2.dataset.q === "quotaNet") {
-          state.quotaNet = t2.checked;
-          window.__zusageQuotaNet = state.quotaNet;   // 泵下次拉取经 wants 求值读走（q0;/q1; 前缀）
-        } else {
-          state.show[t2.dataset.k] = t2.checked ? 1 : 0;
-        }
-        persist();
+        state.show[t2.dataset.k] = t2.checked ? 1 : 0;
+        persist();   // persist 内同步 window.__zusageQuotaNet（条目开关 = 出网开关）
       } else if (t2.id === "zu-ctxov") {
         state.ctxOv = t2.value.trim();
         persist();
