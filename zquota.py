@@ -51,6 +51,9 @@ _cache: dict = {"key": None, "at": 0.0, "payload": None}
 _cache_lock = threading.Lock()
 _fetch_lock = threading.Lock()
 _inflight = False
+# 连续失败退避：网络类失败后 30s 内不重试，之后 ×2 封顶 300s——
+# 否则每个快照周期（1.5s）都重试，密集重试可能触发服务商限流，把瞬时故障放大成长时间锁死
+_fail_state: dict = {"at": 0.0, "backoff": 30.0, "error": ""}
 
 
 # --------------------------------------------------------------------------
@@ -346,12 +349,35 @@ def _store(key: str | None, payload: dict) -> None:
         _cache.update(key=key, at=time.monotonic(), payload=payload)
 
 
+def _fail_gate_ok() -> bool:
+    """失败退避闸：距上次网络类失败不足 backoff 秒时不发起新的刷新（需持有 _cache_lock）。"""
+    return not (_fail_state["at"] and time.monotonic() - _fail_state["at"] < _fail_state["backoff"])
+
+
+def _maybe_schedule_refresh(key: str | None) -> bool:
+    """过期/缺缓存时安排一次后台刷新（单飞 + 失败退避闸）。需持有 _cache_lock。"""
+    global _inflight
+    if _inflight or not _fail_gate_ok():
+        return False
+    _inflight = True
+    threading.Thread(target=_background_refresh, args=(key,), daemon=True).start()
+    return True
+
+
 def _background_refresh(key: str | None) -> None:
     global _inflight
     try:
         payload = _fetch(key)
         if payload.get("ok"):
             _store(key, payload)
+            with _cache_lock:
+                _fail_state.update(at=0.0, backoff=30.0, error="")
+        elif payload.get("reason") == "error":
+            # 网络类失败：留痕（供 UI 显示「上次刷新失败原因」）并按退避推迟下次重试
+            with _cache_lock:
+                _fail_state["at"] = time.monotonic()
+                _fail_state["error"] = str(payload.get("message") or "")[:160]
+                _fail_state["backoff"] = min(_fail_state["backoff"] * 2, 300.0)
     finally:
         with _cache_lock:
             _inflight = False
@@ -375,16 +401,14 @@ def get_quota(provider_id: str | None = None, cfg: dict | None = None) -> dict:
             payload["stale"] = False
             return payload
         stale = dict(_cache["payload"]) if hit else None
-        start_bg = stale is not None and not _inflight
-        if start_bg:
-            _inflight = True
 
     if stale is not None:
-        # 过期：立即返回旧值，后台刷新（不占泵的快照预算）
-        if start_bg:
-            threading.Thread(target=_background_refresh, args=(pid,), daemon=True).start()
+        # 过期：立即返回旧值，后台刷新（单飞 + 失败退避闸，不占泵的快照预算）
+        with _cache_lock:
+            _maybe_schedule_refresh(pid)
         stale["age_s"] = age
         stale["stale"] = True
+        stale["last_error"] = _fail_state["error"] or None
         return stale
 
     # 首次（无缓存）：同步取一次，短超时兜底
@@ -419,14 +443,16 @@ def cached_payload(provider_id: str | None = None, cfg: dict | None = None) -> d
             age = int(time.monotonic() - _cache["at"])
             payload["age_s"] = age
             payload["stale"] = age >= ttl
+            if age >= ttl:
+                payload["last_error"] = _fail_state["error"] or None
+                _maybe_schedule_refresh(pid)
             return payload
-        start_bg = not _inflight
-        if start_bg:
-            _inflight = True
-    if start_bg:
-        threading.Thread(target=_background_refresh, args=(pid,), daemon=True).start()
-    return {"ok": False, "reason": "warming", "provider_name": None, "message": "额度数据预热中…",
-            "age_s": None}
+        started = _maybe_schedule_refresh(pid)
+    if started:
+        return {"ok": False, "reason": "warming", "provider_name": None, "message": "额度数据预热中…",
+                "age_s": None}
+    return {"ok": False, "reason": "error", "provider_name": None,
+            "message": _fail_state["error"] or "上次刷新失败，退避后自动重试", "age_s": None}
 
 
 # --------------------------------------------------------------------------
