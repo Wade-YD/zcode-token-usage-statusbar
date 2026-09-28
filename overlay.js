@@ -148,7 +148,7 @@
   /* ---------- 实例工厂（v61.1）：一个 pane 一套 条/面板/气泡/tooltip/定位循环。
    * slot 0 保留 #zusage-bar/#zusage-tip 兼容 id（泵热更新按它清理），其余实例仅类名。 */
   function spawnInstance(pid, slot) {
-    var VERSION = "v65";   // v65：额度开关合并——条目开关即出网开关（一个勾选管显示与联网）   // 随提交递增（悬停 ⚙ 面板可见）；未提交的中间迭代不涨号
+    var VERSION = "v66";   // v66：额度刷新失败退避（30s×2 封顶 5 分钟）+ tooltip 显示上次失败原因   // 随提交递增（悬停 ⚙ 面板可见）；未提交的中间迭代不涨号
     /* ---------- 状态（实例级） ---------- */
     var excOn = false,    // 本 pane 会话处于"上下文超限被拒"状态（render 时按 picked 会话计算）
       excGone = false,    // 用户点 ✕ 关闭了本次气泡；超限解除后自动复位
@@ -528,7 +528,8 @@
               (q.stale ? '<span class="dim">(' + qAgeTxt + ")</span>" : "");
             qt = L("额度：", "Quota: ") + (q.provider_name || "") + "\n" + wlines.join("\n") +
               (q.fetched_at ? "\n" + L("更新于 ", "Updated ") + q.fetched_at : "") +
-              (q.stale ? "\n⚠ " + L("当前显示 ", "Showing ") + qAgeTxt + L("的缓存数据，后台刷新中或上次刷新失败", " cached data; refreshing in background or last refresh failed") : "");
+              (q.stale ? "\n⚠ " + L("当前显示 ", "Showing ") + qAgeTxt + L("的缓存数据，后台刷新中或上次刷新失败", " cached data; refreshing in background or last refresh failed") +
+                (q.last_error ? "\n" + L("上次刷新失败：", "Last refresh failed: ") + q.last_error : "") : "");
           }
         } else if (q.ok && q.kind === "balance") {
           var cur = (q.currencies || [])[0];
