@@ -62,7 +62,7 @@ ZCode 的插件机制（`plugin.json`）只能提供 MCP / skills / commands / h
 
 ### ⑧ 额度
 
-套餐剩余或 API 余额：按最后一条调用所属服务商自动识别（DeepSeek / 智谱·Z.ai / OpenRouter）。套餐显示 5 小时/每周窗口的剩余百分比（三档变色）与重置时间；余额显示币种金额。约 5 分钟缓存一次；刷新失败时保留上次数据并标注「x 分钟前」。中转站可在 `~/.zcode/v2/provider_config.json` 的规则里配置 `balanceUrl` / `balanceKind` 接入自定义余额接口。额度是唯一的出网行为：⚙ 面板的「出网 → 额度联网查询」开关一键启停（关闭的同时隐藏条目，立即生效）；也可在 config.json 里设 `quota.enabled: false` 做文件级关闭。
+套餐剩余或 API 余额：按最后一条调用所属服务商自动识别（DeepSeek / 智谱·Z.ai / OpenRouter）。套餐显示 5 小时/每周窗口的剩余百分比（三档变色）与重置时间；余额显示币种金额。约 5 分钟缓存一次；刷新失败时保留上次数据并标注「x 分钟前」。中转站可在 `~/.zcode/v2/provider_config.json` 的规则里配置 `balanceUrl` / `balanceKind` 接入自定义余额接口。额度是唯一的出网行为：**条目开关即出网开关**——⚙ 面板取消勾选「额度」即同时停止联网并隐藏条目（立即生效）；config.json 的 `quota.enabled: false` 提供文件级关闭。
 
 ### ⑨ 设置面板
 
