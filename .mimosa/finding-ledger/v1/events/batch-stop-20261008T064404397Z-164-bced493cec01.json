@@ -1,0 +1,69 @@
+{
+  "schemaVersion": "mimosa-finding-ledger-batch/v1",
+  "batchId": "stop-20261008T064404397Z-164-bced493cec01",
+  "runId": "20261008T064404397Z-164-bced493cec01",
+  "runStatus": "inconclusive",
+  "coverage": {
+    "status": "partial",
+    "reasons": [
+      {
+        "code": "baseline_partial",
+        "stage": "baseline",
+        "target": ".",
+        "detail": "baseline capture had enumeration or snapshot errors",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "baseline",
+        "target": ".",
+        "detail": "baseline_partial: baseline capture had enumeration or snapshot errors",
+        "affectsCompletion": true
+      }
+    ]
+  },
+  "source": {
+    "component": "zcode-hook",
+    "operationId": "Stop"
+  },
+  "revision": "26b9b7fc53d7f25e2e99362b2c3cc78b1de76cb3",
+  "diffHash": "2c19f130b8e2e3f13738153cb98c6994b10f636f9393838f4d79dfe93c024fa4",
+  "rulesVersion": "unavailable",
+  "sessionHash": "f067b813c7adf6799b52b7d2150c93073605a1eb17a67ada40fd8c00fc4bcb47",
+  "reportRef": ".mimosa/reports/task-review-sess_bf225fce-9ade-47a7-8bcc-8e4fb27d1f30-20261008T064404397Z-164-bced493cec01.json",
+  "events": [],
+  "observedFindingIds": [
+    "mimosa-d27c6555ffa73dbe593fd7a8",
+    "mimosa-46612bc066f3584135755eb9",
+    "mimosa-ebb578dd70845f757a6c283c",
+    "mimosa-db66db39bec86c4511ac218f"
+  ],
+  "verifiedFiles": [
+    {
+      "file": "watchdog.py",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "zusage.py",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "zquota.py",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "patch_install.py",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "install.py",
+      "direct": "complete",
+      "projectContext": "partial"
+    }
+  ],
+  "recordedAt": "2026-10-08T06:44:04.784Z"
+}

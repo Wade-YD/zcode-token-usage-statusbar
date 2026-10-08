@@ -92,6 +92,8 @@ ZCode 的插件机制（`plugin.json`）只能提供 MCP / skills / commands / h
 - **MCP 对话内查询**：`token_usage(scope)` 工具，scope 支持 current / today / week / days:N / sessions:N / models:days / session:<id前缀>（含按模型与子代理明细）/ workspace:<目录关键词>（按工作区聚合主会话+子代理，含按会话与按模型明细；关键词未命中时会列出候选目录）。
 - **CLI**：`python zusage.py [now|today|json|quota|speed [N]|days N|sessions [N]|models [days]|workspace <目录关键词>|session <id前缀>|watch [秒]]`。
 - **/usage 命令**：对话输入框触发 MCP 查询。
+- **看门狗自愈（Windows）**：安装时注册计划任务 `zusage-watchdog`（每 10 分钟）：ZCode 更新抹掉注入后自动重打并弹系统通知提醒重启。`--no-watchdog` 不注册，`--remove` 删除。
+- **doctor 自检**：`python zusage.py doctor [--net]` 一条命令检查 Python / db 列完整性 / 运行时文件 / asar 注入 / diag / 泵进程，报障时先跑这个。
 
 ## 文件说明
 

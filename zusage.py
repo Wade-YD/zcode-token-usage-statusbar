@@ -5,6 +5,7 @@
 也可被 usage_mcp.py import 为查询库。
 """
 import json
+import os
 import re
 import shlex
 import sqlite3
@@ -22,6 +23,15 @@ except Exception:
 
 DB_PATH = Path.home() / ".zcode" / "cli" / "db" / "db.sqlite"
 CONFIG_PATH = Path(__file__).parent / "config.json"
+
+# doctor 用的期望列清单（ZCode 升级改表结构时，doctor 据此报告兼容性；与查询容错共用）
+EXPECTED_MODEL_USAGE_COLUMNS = (
+    "id", "session_id", "status", "query_source", "provider_id", "model_id",
+    "turn_id", "started_at", "completed_at", "first_token_at", "duration_ms",
+    "time_to_first_token_ms", "input_tokens", "output_tokens", "reasoning_tokens",
+    "cache_read_input_tokens", "cache_creation_input_tokens", "computed_total_tokens",
+    "context_exceeded",
+)
 
 
 def load_config():
@@ -1068,6 +1078,112 @@ def snapshot(force_sid="", include_quota=False, quota_enabled=True):
 
 # ---------- CLI ----------
 
+def doctor(net=False):
+    """全链路自检（只读；--net 才探测额度连通性）。返回退出码：存在 ✗ 为 1。"""
+    cfg = load_config()
+    # 从仓库源码目录运行时（标准安装的运行时在数据目录），改读数据目录的 config
+    runtime_cfg = Path.home() / ".zcode" / "zcode-token-usage-statusbar" / "config.json"
+    if runtime_cfg.is_file() and not (Path(__file__).parent / "config.json").is_file():
+        try:
+            cfg.update(json.loads(runtime_cfg.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            pass
+    results = []
+
+    def add(name, ok, hint=""):
+        results.append((name, bool(ok), str(hint or "")))
+
+    add("Python ≥ 3.10", sys.version_info >= (3, 10), sys.version.split()[0])
+
+    if not DB_PATH.is_file():
+        add("db 存在", False, f"未找到 {DB_PATH}")
+    else:
+        try:
+            con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=5)
+            cols = [r[1] for r in con.execute("PRAGMA table_info(model_usage)")]
+            con.close()
+            add("db 存在（只读打开）", True)
+            missing = [c for c in EXPECTED_MODEL_USAGE_COLUMNS if c not in cols]
+            add("model_usage 列完整性", not missing,
+                ("缺列: " + ", ".join(missing) + "（相关功能降级，其余照常）") if missing else f"{len(cols)} 列齐")
+        except sqlite3.Error as e:
+            add("db 可读", False, str(e)[:120])
+
+    here = Path(__file__).parent
+    runtime = Path.home() / ".zcode" / "zcode-token-usage-statusbar"
+    if (runtime / "overlay.js").is_file():
+        here = runtime   # 标准安装：检查数据目录副本（真正在运行的那份）
+    need = ("inject-main.cjs", "overlay.js", "zusage.py", "zquota.py", "usage_mcp.py")
+    miss = [f for f in need if not (here / f).is_file()]
+    add("运行时文件齐全", not miss,
+        ("缺: " + ", ".join(miss) + "（重跑 install.py）") if miss else f"{len(need)}/{len(need)}")
+
+    asar_hint = "config.json 未记录 asar_path（重跑 install.py 可写入）"
+    asar_ok = False
+    asar = cfg.get("asar_path")
+    if asar and Path(asar).is_file():
+        try:
+            import struct
+            with open(asar, "rb") as f:
+                a, b, c, d = struct.unpack("<4I", f.read(16))
+                header = json.loads(f.read(d))
+            node = header["files"]["out"]["files"]["main"]["files"]["index.js"]
+            f2 = open(asar, "rb")
+            f2.seek(8 + b + int(node["offset"]))
+            entry = f2.read(int(node["size"])).decode("utf-8", "replace")
+            f2.close()
+            asar_ok = "inject-main" in entry
+            asar_hint = "注入行在" if asar_ok else "注入行缺失：重跑 python install.py 后重启 ZCode"
+        except Exception as e:
+            asar_hint = f"读取失败：{e}"
+    add("asar 注入", asar_ok, asar_hint)
+
+    diags = sorted(here.glob("diag-*.json"), key=lambda p: p.stat().st_mtime)
+    if diags:
+        newest = diags[-1]
+        age_s = int(time.time() - newest.stat().st_mtime)
+        try:
+            d = json.loads(newest.read_text(encoding="utf-8"))
+            err = (d.get("updateErr") or d.get("trackErr") or "")
+        except Exception:
+            err = "diag 解析失败"
+        add("diag 状态", True, f"{os.path.basename(newest)} 更新于 {age_s} 秒前" +
+            (f" · ⚠ {err[:100]}" if err else ""))
+    else:
+        add("diag 存在", False, "运行时目录没有 diag-*.json（状态条从未加载，重跑 install.py）")
+
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "(Get-CimInstance Win32_Process | Where-Object { $_.Name -like 'python*' -and $_.CommandLine -like '*zusage.py*serve*' } | Measure-Object).Count"],
+            capture_output=True, text=True, timeout=15)
+        cnt = int(out.stdout.strip() or 0)
+        add("泵进程（尽力而为）", True,
+            f"{cnt} 个" + ("（一次性回退模式或空闲期可能为 0，仅提示）" if cnt == 0 else ""))
+    except Exception as e:
+        add("泵进程（尽力而为）", True, f"无法检测（{e}），不影响判定")
+
+    if zquota is None:
+        add("额度模块", False, "zquota.py 缺失（重跑 install.py）")
+    else:
+        q = zquota.cached_payload(cfg=cfg)
+        add("额度模块（缓存视图，未出网）", True,
+            f"ok={q.get('ok')} reason={q.get('reason')} age_s={q.get('age_s')}")
+    if net and zquota is not None:
+        q = zquota.get_quota(cfg=load_config())
+        add("额度连通性（--net，真实出网）", bool(q.get("ok")),
+            (q.get("provider_name") or "") + (f" / {q.get('message')}" if q.get("message") else ""))
+
+    print(L("zusage doctor 自检", "zusage doctor"))
+    bad = 0
+    for name, ok, hint in results:
+        if not ok:
+            bad += 1
+        print(f" {'✓' if ok else '✗'} {name}" + (f" — {hint}" if hint else ""))
+    print(L("结果：", "Result: ") + ("全部通过" if not bad else f"{bad} 项异常"))
+    return 1 if bad else 0
+
+
 def serve():
     """常驻查询服务（v8 泵配套）：省每次 ~60-100ms 的解释器启动+模块加载费。
     stdin 每行一个请求（空行 = 无强制会话），stdout 每行一个 JSON 快照。
@@ -1103,6 +1219,9 @@ def main(argv):
     except Exception:
         pass
     cmd = argv[0] if argv else "now"
+    if cmd == "doctor":
+        # db 缺失时也要能出报告：doctor 自管检查，不预建连接（P1-4）
+        return doctor(net="--net" in argv)
     con = connect()
     if cmd == "now":
         print(render_current(con))
@@ -1174,4 +1293,4 @@ def render_today(con):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    sys.exit(main(sys.argv[1:]))

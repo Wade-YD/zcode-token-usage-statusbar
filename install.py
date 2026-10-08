@@ -35,6 +35,7 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -93,7 +94,8 @@ ZCODE_CONFIG = real_home() / ".zcode" / "cli" / "config.json"
 COMMANDS_DIR = real_home() / ".zcode" / "commands"
 MCP_NAME = "zcode-token-usage-statusbar"   # MCP server 注册名（与仓库名一致；老安装叫 token-usage/zusage，自动迁移）
 MCP_NAME_OLD = ("token-usage", "zusage")   # 历史注册名
-RUNTIME_FILES = ("inject-main.cjs", "overlay.js", "zusage.py", "zquota.py", "usage_mcp.py")
+RUNTIME_FILES = ("inject-main.cjs", "overlay.js", "zusage.py", "zquota.py", "usage_mcp.py", "watchdog.py")
+WATCHDOG_TASK = "zusage-watchdog"
 
 # ZCode 安装位置候选：resources/app.asar 存在即命中（按序探测，按当前平台取组）
 if sys.platform == "darwin":
@@ -404,6 +406,50 @@ def remove_command(dry):
     return True
 
 
+def register_watchdog(dry, dev):
+    """注册用户级计划任务 zusage-watchdog（每 10 分钟跑一次注入自愈检查器）。"""
+    if sys.platform != "win32":
+        print(L("[看门狗] 仅 Windows 支持计划任务自愈，跳过注册", "[watchdog] scheduled-task self-heal is Windows-only; skipped"))
+        return True
+    script = HERE / "watchdog.py" if dev else DATA_DIR / "watchdog.py"
+    pyw = Path(sys.executable).with_name("pythonw.exe")
+    if pyw.is_file():
+        py = str(pyw)   # pythonw：周期运行不闪控制台
+    else:
+        py = str(sys.executable)
+        print(L("[看门狗] ⚠ 未找到 pythonw.exe，将回退 python.exe（每次检查可能闪现控制台窗口）",
+                "[watchdog] ⚠ pythonw.exe not found; falling back to python.exe (a console window may flash on each check)"))
+    print(L(f"[看门狗] 注册计划任务 zusage-watchdog（每 10 分钟自检注入）→ {script}",
+            f"[watchdog] registering scheduled task zusage-watchdog (every 10 min) -> {script}"))
+    if dry:
+        return True
+    try:
+        r = subprocess.run(
+            ["schtasks", "/Create", "/F", "/TN", WATCHDOG_TASK, "/SC", "MINUTE", "/MO", "10",
+             "/TR", f'"{py}" "{script}"'],
+            capture_output=True, text=True)
+    except OSError as e:
+        print(L(f"[看门狗] 注册失败：{e}", f"[watchdog] register failed: {e}"))
+        return False
+    if r.returncode != 0:
+        print(L(f"[看门狗] 注册失败：{(r.stderr or r.stdout).strip()[:160]}（不影响状态条，仅无自愈）",
+                f"[watchdog] register failed: {(r.stderr or r.stdout).strip()[:160]} (bar still works, no self-heal)"))
+        return False
+    return True
+
+
+def remove_watchdog(dry):
+    print(L("[看门狗] 删除计划任务 zusage-watchdog", "[watchdog] deleting scheduled task zusage-watchdog"))
+    if dry:
+        return True
+    try:
+        subprocess.run(["schtasks", "/Delete", "/F", "/TN", WATCHDOG_TASK],
+                       capture_output=True, text=True)
+    except OSError:
+        pass
+    return True
+
+
 def remove_data_dir(dry):
     """删除标准数据目录（运行时副本+配置+诊断）。--dev 安装没有数据目录，此处自然跳过。"""
     if not DATA_DIR.exists():
@@ -433,6 +479,8 @@ def main():
     ap.add_argument("--dev", action="store_true", help=L("开发模式：不复制运行时，注入直指本仓库目录（配置/诊断留在仓库）",
                                                          "dev mode: no runtime copy; injection points at this repo (config/diagnostics stay in the repo)"))
     ap.add_argument("--remove", action="store_true", help=L("卸载", "uninstall"))
+    ap.add_argument("--no-watchdog", action="store_true",
+                    help=L("不注册看门狗计划任务（注入自愈检查）", "skip registering the watchdog scheduled task"))
     ap.add_argument("--dry-run", action="store_true", help=L("只打印动作不落盘", "print actions without writing anything"))
     ap.add_argument("--lang", choices=("zh", "en"), default=None,
                     help=L("输出语言（默认 zh；写入 config.json 供 CLI/MCP 沿用）",
@@ -462,6 +510,7 @@ def main():
             return 0 if ok else 1
         remove_mcp(args.dry_run)
         remove_command(args.dry_run)
+        remove_watchdog(args.dry_run)
         remove_data_dir(args.dry_run)
         print(L("卸载完成。", "Uninstall complete."))
         return 0 if ok else 1
@@ -513,6 +562,10 @@ def main():
     if not args.no_mcp:
         register_mcp(args.dry_run, args.dev)
         install_command(args.dry_run)
+    if args.no_watchdog:
+        print(L("[看门狗] 按参数跳过计划任务注册", "[watchdog] skipping scheduled task registration (--no-watchdog)"))
+    else:
+        register_watchdog(args.dry_run, args.dev)
     print("\n" + L("全部完成。重启 ZCode 后窗口底部出现悬浮条；对话内可用 /usage 查询。",
                    "All done. After restarting ZCode the floating bar appears at the bottom of the window; use /usage in chat to query."))
     return 0 if ok else 1
