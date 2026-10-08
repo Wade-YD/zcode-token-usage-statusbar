@@ -9,3 +9,6 @@ diag-*.json
 .zcode/
 config.json
 .update-baseline.json
+.mimosa/
+watchdog.log
+watchdog-state.json
