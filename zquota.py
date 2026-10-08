@@ -354,8 +354,13 @@ def _fail_gate_ok() -> bool:
     return not (_fail_state["at"] and time.monotonic() - _fail_state["at"] < _fail_state["backoff"])
 
 
+_neg: dict = {"key": None, "at": 0.0, "payload": None}
+_NEG_TTL = 60           # 结构性失败（unsupported/no_key）负缓存：避免每个快照周期都重查
+
+
 def _maybe_schedule_refresh(key: str | None) -> bool:
-    """过期/缺缓存时安排一次后台刷新（单飞 + 失败退避闸）。需持有 _cache_lock。"""
+    """过期/缺缓存时安排一次后台刷新（单飞 + 失败退避闸）。需持有 _cache_lock。
+    返回 True=已派发；False=在途（_inflight）或处于失败退避窗口。"""
     global _inflight
     if _inflight or not _fail_gate_ok():
         return False
@@ -378,6 +383,10 @@ def _background_refresh(key: str | None) -> None:
                 _fail_state["at"] = time.monotonic()
                 _fail_state["error"] = str(payload.get("message") or "")[:160]
                 _fail_state["backoff"] = min(_fail_state["backoff"] * 2, 300.0)
+        else:
+            # 结构性失败（unsupported/no_key 等）：负缓存 60s，避免每个快照周期重复起线程
+            with _cache_lock:
+                _neg.update(key=key, at=time.monotonic(), payload=payload)
     finally:
         with _cache_lock:
             _inflight = False
@@ -448,9 +457,20 @@ def cached_payload(provider_id: str | None = None, cfg: dict | None = None) -> d
                 _maybe_schedule_refresh(pid)
             return payload
         started = _maybe_schedule_refresh(pid)
+    with _cache_lock:
+        busy = _inflight
+        neg_fresh = (_neg["payload"] is not None and _neg["key"] == pid
+                     and time.monotonic() - _neg["at"] < _NEG_TTL)
     if started:
         return {"ok": False, "reason": "warming", "provider_name": None, "message": "额度数据预热中…",
                 "age_s": None}
+    with _cache_lock:
+        busy = _inflight
+    if busy:
+        return {"ok": False, "reason": "warming", "provider_name": None, "message": "额度数据刷新中…",
+                "age_s": None}
+    if neg_fresh:
+        return dict(_neg["payload"])
     return {"ok": False, "reason": "error", "provider_name": None,
             "message": _fail_state["error"] or "上次刷新失败，退避后自动重试", "age_s": None}
 

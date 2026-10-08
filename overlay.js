@@ -148,7 +148,7 @@
   /* ---------- 实例工厂（v61.1）：一个 pane 一套 条/面板/气泡/tooltip/定位循环。
    * slot 0 保留 #zusage-bar/#zusage-tip 兼容 id（泵热更新按它清理），其余实例仅类名。 */
   function spawnInstance(pid, slot) {
-    var VERSION = "v66";   // v66：额度刷新失败退避（30s×2 封顶 5 分钟）+ tooltip 显示上次失败原因   // 随提交递增（悬停 ⚙ 面板可见）；未提交的中间迭代不涨号
+    var VERSION = "v67";   // v67：复制诊断按钮（⚙ 面板，报障一键给上下文）   // 随提交递增（悬停 ⚙ 面板可见）；未提交的中间迭代不涨号
     /* ---------- 状态（实例级） ---------- */
     var excOn = false,    // 本 pane 会话处于"上下文超限被拒"状态（render 时按 picked 会话计算）
       excGone = false,    // 用户点 ✕ 关闭了本次气泡；超限解除后自动复位
@@ -326,6 +326,7 @@
       '<label><input type="radio" name="zu-lang" value="zh"><span>中文</span></label>' +
       '<label><input type="radio" name="zu-lang" value="en"><span>English</span></label>' +
       '<div class="hr"></div>' +
+      '<div class="zu-diagcpy" role="button">' + L("📋 复制诊断", "📋 Copy diagnostics") + '</div>' +
       '<div class="pnote">' + L("悬停条面各项看明细；点击子代理项看全部明细面板。数据源 ~/.zcode/cli/db/db.sqlite（只读），请求完成后才落库，数值随上次完成请求变化。",
         "Hover bar items for details; click the sub-agent item for the full detail panel. Data source ~/.zcode/cli/db/db.sqlite (read-only); rows are written when requests complete, numbers follow the latest completed request.") + '</div>';
       panel.querySelectorAll('input[name=zu-lang]').forEach(function (r) {
@@ -982,6 +983,45 @@
         persist();
       }
       renderAll(false);
+    });
+    /* 「复制诊断」：版本 / 开关 / 最近错误 / 额度状态 / diag 摘要 → 剪贴板（报障用） */
+    function legacyCopy(text) {
+      var ta = document.createElement("textarea");
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      var ok3 = false;
+      try { ok3 = document.execCommand("copy"); } catch (e) { }
+      ta.remove();
+      return ok3;
+    }
+    function buildDiagText() {
+      var d = state.data || {};
+      var q = d.quota || {};
+      return [
+        "zusage " + VERSION + " · lang=" + state.lang,
+        "show=" + JSON.stringify(state.show),
+        "updateErr=" + (FATAL.updateErr || "无"),
+        "trackErr=" + (FATAL.trackErr || "无"),
+        "quota=" + JSON.stringify(q),
+        "diag=" + JSON.stringify(window.__zusageDiag || {}).slice(0, 1000),
+        "payloadKeys=" + Object.keys(d).join(","),
+      ].join("\n");
+    }
+    panel.addEventListener("click", function (e) {
+      if (stale()) return;
+      var t3 = e.target;
+      if (t3.classList && t3.classList.contains("zu-diagcpy")) {
+        var txt = buildDiagText();
+        var done = function (ok3) {
+          t3.textContent = ok3 ? L("已复制 ✓", "Copied ✓") : L("复制失败", "Copy failed");
+          setTimeout(function () { if (!stale()) t3.textContent = L("📋 复制诊断", "📋 Copy diagnostics"); }, 1500);
+        };
+        try {
+          navigator.clipboard.writeText(txt).then(function () { done(true); },
+            function () { done(legacyCopy(txt)); });
+        } catch (err) { done(legacyCopy(txt)); }
+      }
     });
     document.addEventListener("mousedown", function (e) {
       if (panel.classList.contains("open") && !bar.contains(e.target)) panel.classList.remove("open");

@@ -84,6 +84,8 @@ Click ⚙ to toggle any bar item, override the context window size, or switch th
 - **MCP in-chat query**: `token_usage(scope)` supporting current / today / week / days:N / sessions:N / models:days / session:<id prefix> (with per-model and subagent details) / workspace:<dir keyword> (aggregates a workspace's main sessions + subagents, with per-session and per-model details; unmatched keywords return candidate directories).
 - **CLI**: `python zusage.py [now|today|json|quota|speed [N]|days N|sessions [N]|models [days]|workspace <dir keyword>|session <id prefix>|watch]`.
 - **/usage command** in the chat input.
+- **Watchdog self-heal (Windows)**: install registers a scheduled task `zusage-watchdog` (every 10 min) — when a ZCode update wipes the injection, it re-patches automatically and shows a system notification prompting a restart. `--no-watchdog` skips it, `--remove` deletes it.
+- **doctor self-check**: `python zusage.py doctor [--net]` checks Python / db column integrity / runtime files / asar injection / diag / pump process in one command — run this first when troubleshooting.
 
 ## Installation
 

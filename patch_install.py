@@ -318,6 +318,15 @@ def syntax_check(asar_path: Path):
     return r.returncode == 0
 
 
+def _delete_watchdog_task():
+    """删除本工具注册的计划任务（zusage-watchdog）。用户显式卸载后，看门狗不得再自动重打注入。"""
+    try:
+        subprocess.run(["schtasks", "/Delete", "/F", "/TN", "zusage-watchdog"],
+                       capture_output=True, text=True)
+    except OSError:
+        pass
+
+
 def cleanup_legacy_bak():
     """备份机制已退役（安装/卸载均改为剥离注入行）：清掉历史版本遗留的 .bak，省约 300MB 磁盘。"""
     if not BAK.exists():
@@ -332,8 +341,9 @@ def cleanup_legacy_bak():
 
 # ---------- 安装 / 卸载 ----------
 
-def install(finalize=False):
-    """返回 True=已安装/已指向当前目录，False=失败或待收尾。"""
+def install(finalize=False, quiet=False):
+    """返回 True=已安装/已指向当前目录，False=失败或待收尾。
+    quiet=True：计划任务等无人值守路径使用——不弹监控窗口（通知由调用方负责）。"""
     assert LOADER.exists(), L(f"loader 缺失：{LOADER}", f"loader missing: {LOADER}")
     if not os.access(ASAR, os.W_OK) or not os.access(ASAR.parent, os.W_OK):
         print(L(f"[权限] app.asar 或所在目录不可写（Linux 上 /opt 等系统位置需要 root）：{ASAR}",
@@ -369,25 +379,30 @@ def install(finalize=False):
             print(L("重启 ZCode 后悬浮条生效；已弹出监控窗口，确认生效后自动关闭。",
                     "The floating bar activates after restarting ZCode; a monitor window has opened and will close itself once the load is confirmed."))
             cleanup_legacy_bak()
-            launch_monitor(time.time())
+            if not quiet: launch_monitor(time.time())
             return True
         except OSError as e:
-            print(L(f"\n运行中替换失败（{e}）。已弹出监控窗口：完全退出 ZCode 后会自动完成替换，",
-                    f"\nReplacement while running failed ({e}). A monitor window has opened: it finishes the replacement once ZCode quits completely,"))
-            print(L("或之后手动执行：python patch_install.py install --finalize",
-                    "or run manually afterwards: python patch_install.py install --finalize"))
-            launch_monitor(time.time())
+            if quiet:
+                print(L(f"\n运行中替换失败（{e}）。.tmp 已暂存：完全退出 ZCode 后由看门狗自动完成替换。",
+                        f"\nReplacement while running failed ({e}). The .tmp is staged; the watchdog finishes the swap once ZCode quits completely."))
+            else:
+                print(L(f"\n运行中替换失败（{e}）。已弹出监控窗口：完全退出 ZCode 后会自动完成替换，",
+                        f"\nReplacement while running failed ({e}). A monitor window has opened: it finishes the replacement once ZCode quits completely,"))
+                print(L("或之后手动执行：python patch_install.py install --finalize",
+                        "or run manually afterwards: python patch_install.py install --finalize"))
+            if not quiet: launch_monitor(time.time())
             return False
     os.replace(TMP, ASAR)
     print(L("完成。启动 ZCode 即可在窗口底部看到悬浮条。", "Done. Start ZCode and the floating bar appears at the bottom of the window."))
     cleanup_legacy_bak()
-    launch_monitor(time.time())
+    if not quiet: launch_monitor(time.time())
     return True
 
 
 def remove():
     """卸载：从当前 asar 剥离本工具注入行（不依赖备份，其它工具的注入行不受影响）。
     返回 True=已卸载/本就未注入，False=需人工处理（替换失败待收尾）。"""
+    _delete_watchdog_task()   # 用户显式卸载：看门狗一并退出，避免自动「复活」注入（P1-5）
     old = entry_bytes_of(ASAR)
     stripped = ZUSAGE_LINE_RE.sub(b"", old)
     if stripped == old:

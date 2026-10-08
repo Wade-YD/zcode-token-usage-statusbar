@@ -161,6 +161,15 @@ function handlePayload(payload) {
                 activeMap: Array.from(activeSid.entries()).slice(0, 12),
                 wants: lastWants,
               };
+              /* 额度状态入 diag（v64）：额度故障无需访问 python 侧即可判读 */
+              if (payload.quota) {
+                obj.quota = {
+                  ok: !!payload.quota.ok,
+                  reason: payload.quota.reason || null,
+                  age_s: payload.quota.age_s ?? null,
+                  last_error: payload.quota.last_error || null,
+                };
+              }
               fs.writeFileSync(file, JSON.stringify(obj));
             } catch (e2) {
               try { fs.writeFileSync(file, s); } catch (e) { }
