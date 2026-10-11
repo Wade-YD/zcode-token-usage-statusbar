@@ -17,6 +17,8 @@
  * 幻影屏蔽（v68）：无 data-pane-id 祖先的输入元素（测量镜像/副面板输入）不再开 "auto"
  *       兜底条——它与真 pane 的 composer 同位，叠出双条（2026-10-11 实测）；见过真 pane
  *       键后 auto 永久关闭，从未见过 pane 的场景保留 auto 兜底并加 3 拍水合宽限。
+ * 幻影压制加固（v69）：已出生的 auto 实例（冷启动慢水合窗口）也服从压制——heavy() 的 auto 分支在 autoSuppressed
+ *       时停止自寻输入框，修掉 attach(null) 被其无视的残留（Oracle 验收 P2）。
  * 当前会话（v34）：泵按窗口注入 payload.mine（客户端渲染端经 IPC 向主进程上报的焦点会话 id，
  *       可为空串）；overlay 优先显示 mine 对应的池条目，池里还没有（新会话没数据）就显示
  *       零值 —— 绝不回退到"别的会话"的数字（多窗口共享 localStorage 时旧启发式必错，实测）。
@@ -67,6 +69,7 @@
   /* ---------- 多实例注册表（v61.1）：每个分屏 pane 一个条实例 ---------- */
   var instances = [];   // spawnInstance 返回的 api：{pid, attach, render, ...}
   var nextSlot = 0;     // 实例序号；0 号保留兼容 id（#zusage-bar，泵热更新按它清理）
+  var autoSuppressed = false;   // v68/v69：协调器见过真 pane 即置位——auto 兜底实例（含已出生的）整体压制
   function renderAll(rebuildPanels) {
     for (var i = 0; i < instances.length; i++) {
       if (rebuildPanels) instances[i].rebuild();   // 语言切换等文案重建（各实例面板独立 DOM）
@@ -147,10 +150,10 @@
           }
         }
         var keys;
+        autoSuppressed = hadPane;   // v69：联动到 auto 已出生实例（heavy 不再自绑幻影输入框）
         if (hadPane) { keys = paneKeys; autoStreak = 0; }
         else if (autoKeys.length) { keys = ++autoStreak >= 3 ? autoKeys : []; }
-        else { keys = paneKeys; autoStreak = 0; }
-        if (!keys.length && !instances.length) best["auto"] = { el: null, top: 0 };   // 主文档找不到（shadow/iframe 场景）→ 0 号实例走自带 deepFind 兜底
+        else { keys = []; autoStreak = 0; }   // 此分支 paneKeys 必为空，写 [] 更直白（Oracle P3）
         keys.forEach(function (k) {
           var inst = null;
           for (var i = 0; i < instances.length; i++) if (instances[i].pid === k) { inst = instances[i]; break; }
@@ -170,7 +173,7 @@
   /* ---------- 实例工厂（v61.1）：一个 pane 一套 条/面板/气泡/tooltip/定位循环。
    * slot 0 保留 #zusage-bar/#zusage-tip 兼容 id（泵热更新按它清理），其余实例仅类名。 */
   function spawnInstance(pid, slot) {
-    var VERSION = "v68";   // v68：幻影 composer 屏蔽（auto 实例与真 pane 同位叠双条）   // 随提交递增（悬停 ⚙ 面板可见）；未提交的中间迭代不涨号
+    var VERSION = "v69";   // v69：auto 兜底实例也服从协调器压制（heavy auto 分支）+ 死代码清理   // 随提交递增（悬停 ⚙ 面板可见）；未提交的中间迭代不涨号
     /* ---------- 状态（实例级） ---------- */
     var excOn = false,    // 本 pane 会话处于"上下文超限被拒"状态（render 时按 picked 会话计算）
       excGone = false,    // 用户点 ✕ 关闭了本次气泡；超限解除后自动复位
@@ -1361,10 +1364,16 @@
       if (stale()) return;
       if (pid === "auto") {
         /* 兜底模式（主文档找不到带 pane 标记的输入框，shadow/iframe 场景）：沿用原
-         * 单条查找链路（findComposer 含 deepFind 穿透），会话判定走 mine/pickCurrent */
-        var el = findComposer();
-        if (el && el !== composer) setComposer(el);
-        else if (!el && composer && !composer.isConnected) setComposer(null);
+         * 单条查找链路（findComposer 含 deepFind 穿透），会话判定走 mine/pickCurrent。
+         * v69：协调器见过真 pane 后 auto 实例整体受压——本分支历史上无视 attach(null)，
+         * 冷启动慢水合窗口里出生的 auto 会每拍自绑回幻影、叠持久双条（Oracle 验收 P2）。 */
+        if (autoSuppressed) {
+          if (composer) setComposer(null);   // 解绑已绑上的幻影输入框，条随 composer 缺失自藏
+        } else {
+          var el = findComposer();
+          if (el && el !== composer) setComposer(el);
+          else if (!el && composer && !composer.isConnected) setComposer(null);
+        }
       } else {
         /* v61.1 多实例：composer 由协调器按 pane 派发（wantedEl），本层只对账——
          * 元素被 React 重建/pane 关闭时清绑，等下一轮协调器重新派发 */
