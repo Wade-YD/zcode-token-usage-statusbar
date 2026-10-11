@@ -14,6 +14,9 @@
  * 分屏（v61.1）：协调器每 600ms 扫描可见输入框，按 pane（data-pane-id）派发实例——
  *       一个 pane 一条，各自显示 composer 祖先链 data-session-id 指向的会话；
  *       各 pane 会话 id 汇总挂 window.__zusageWantSids 交泵强制拉取（旧泵忽略）。
+ * 幻影屏蔽（v68）：无 data-pane-id 祖先的输入元素（测量镜像/副面板输入）不再开 "auto"
+ *       兜底条——它与真 pane 的 composer 同位，叠出双条（2026-10-11 实测）；见过真 pane
+ *       键后 auto 永久关闭，从未见过 pane 的场景保留 auto 兜底并加 3 拍水合宽限。
  * 当前会话（v34）：泵按窗口注入 payload.mine（客户端渲染端经 IPC 向主进程上报的焦点会话 id，
  *       可为空串）；overlay 优先显示 mine 对应的池条目，池里还没有（新会话没数据）就显示
  *       零值 —— 绝不回退到"别的会话"的数字（多窗口共享 localStorage 时旧启发式必错，实测）。
@@ -116,6 +119,7 @@
       return "";
     }
     var SEL = 'textarea, [contenteditable="true"], [role="textbox"], .ProseMirror, .ql-editor';
+    var autoStreak = 0;   // auto 兜底的水合宽限：连续多少拍只见 auto（600ms/拍）
     function tick() {
       if (stale()) return;
       try {
@@ -127,7 +131,25 @@
           var k = paneKeyOf(el);
           if (!best[k] || r.top > best[k].top) best[k] = { el: el, top: r.top };
         });
-        var keys = Object.keys(best);
+        var keys0 = Object.keys(best);
+        /* 幻影 composer 屏蔽（v68）：无 pane 祖先的输入元素会拿到 "auto" 键，与真 pane
+         * 实例同位叠双条（2026-10-11 实测）。凡存在真 pane 键（本拍或历史实例），
+         * auto 一律忽略；从未见过 pane 的场景才兜底，且连续 3 拍仍是 auto 才开
+         * （给 data-pane-id 水合留时间，消启动期 auto→pane 换手的闪现）。 */
+        var paneKeys = [], autoKeys = [], ik, i2;
+        for (ik = 0; ik < keys0.length; ik++) {
+          if (keys0[ik] === "auto") autoKeys.push(keys0[ik]); else paneKeys.push(keys0[ik]);
+        }
+        var hadPane = paneKeys.length > 0;
+        if (!hadPane) {
+          for (i2 = 0; i2 < instances.length; i2++) {
+            if (instances[i2].pid !== "auto") { hadPane = true; break; }
+          }
+        }
+        var keys;
+        if (hadPane) { keys = paneKeys; autoStreak = 0; }
+        else if (autoKeys.length) { keys = ++autoStreak >= 3 ? autoKeys : []; }
+        else { keys = paneKeys; autoStreak = 0; }
         if (!keys.length && !instances.length) best["auto"] = { el: null, top: 0 };   // 主文档找不到（shadow/iframe 场景）→ 0 号实例走自带 deepFind 兜底
         keys.forEach(function (k) {
           var inst = null;
@@ -148,7 +170,7 @@
   /* ---------- 实例工厂（v61.1）：一个 pane 一套 条/面板/气泡/tooltip/定位循环。
    * slot 0 保留 #zusage-bar/#zusage-tip 兼容 id（泵热更新按它清理），其余实例仅类名。 */
   function spawnInstance(pid, slot) {
-    var VERSION = "v67";   // v67：复制诊断按钮（⚙ 面板，报障一键给上下文）   // 随提交递增（悬停 ⚙ 面板可见）；未提交的中间迭代不涨号
+    var VERSION = "v68";   // v68：幻影 composer 屏蔽（auto 实例与真 pane 同位叠双条）   // 随提交递增（悬停 ⚙ 面板可见）；未提交的中间迭代不涨号
     /* ---------- 状态（实例级） ---------- */
     var excOn = false,    // 本 pane 会话处于"上下文超限被拒"状态（render 时按 picked 会话计算）
       excGone = false,    // 用户点 ✕ 关闭了本次气泡；超限解除后自动复位
