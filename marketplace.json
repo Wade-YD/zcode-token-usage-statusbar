@@ -1,0 +1,27 @@
+{
+  "name": "zusage-marketplace",
+  "description": "ZCode Token 用量状态条插件市场：会话启动时同步运行时并自检修复桌面悬浮状态条（修改 app.asar，成功后需完全退出并重开）；/usage 命令、MCP 与额度显示由 install.py 主安装提供。",
+  "owner": {
+    "name": "Wade-YD",
+    "url": "https://github.com/Wade-YD"
+  },
+  "plugins": [
+    {
+      "name": "zusage-statusbar",
+      "source": "./plugin",
+      "description": "ZCode Token 用量状态条插件壳：会话启动（startup|resume）时把仓库运行时同步到数据目录（字节比较，内容不变不写）并执行一次注入自检（与 10 分钟计划任务 watchdog 同一实现：精确匹配、暂存收尾、通知防抖）；/usage 命令、MCP 工具、额度显示由 install.py 主安装提供，插件不携带运行时副本。",
+      "version": "1.0.0",
+      "author": {
+        "name": "Wade-YD"
+      },
+      "category": "monitoring",
+      "keywords": [
+        "token",
+        "usage",
+        "statusbar",
+        "zusage",
+        "quota"
+      ]
+    }
+  ]
+}

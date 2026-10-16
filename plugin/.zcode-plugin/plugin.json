@@ -1,0 +1,18 @@
+{
+  "name": "zusage-statusbar",
+  "version": "1.0.0",
+  "description": "ZCode Token 用量状态条插件壳：会话启动（startup|resume）时把仓库运行时同步到数据目录（字节比较，内容不变不写）并执行一次注入自检（与 10 分钟计划任务 watchdog 同一实现：精确匹配、暂存收尾、通知防抖）；数据目录缺失时本插件即引导安装（同步全套运行时并自动注入）。/usage 命令、MCP 工具、额度显示由 install.py 主安装提供，插件不携带运行时副本。",
+  "author": {
+    "name": "Wade-YD"
+  },
+  "homepage": "https://github.com/Wade-YD/zcode-token-usage-statusbar",
+  "repository": "https://github.com/Wade-YD/zcode-token-usage-statusbar",
+  "license": "MIT",
+  "keywords": [
+    "token",
+    "usage",
+    "statusbar",
+    "zusage",
+    "quota"
+  ]
+}

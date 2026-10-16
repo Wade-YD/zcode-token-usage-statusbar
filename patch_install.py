@@ -5,6 +5,12 @@
   python patch_install.py install   # 安装/重定向（幂等；自动替换旧注入行，含指向旧目录的历史行；
                                     # 客户端运行中则生成 .tmp 待退出后替换）
   python patch_install.py install --finalize  # 客户端退出后完成替换
+  python patch_install.py install --finalize --asar <app.asar 路径> --runtime <运行时目录>
+                                    # standalone（不经 install.py / watchdog 拉起）须显式指定
+                                    # 非默认安装位置的目标，否则按平台默认猜测，自定义路径下
+                                    # 会猜错；也可各设一次环境变量 ZCODE_ASAR / ZCODE_RUNTIME
+                                    # 代替（命令行参数优先）。--runtime 指注入行指向的运行时
+                                    # 目录（标准安装即数据目录）；remove/check 不需要它。
   python patch_install.py remove    # 卸载（从 asar 剥离本工具注入行，不依赖备份）
   python patch_install.py check     # 检查当前注入状态与入口语法
 
@@ -35,8 +41,17 @@ IS_WIN = sys.platform == "win32"
 IS_MAC = sys.platform == "darwin"
 
 if IS_WIN:
-    ASAR_DEFAULT = Path(r"D:\ZCode\resources\app.asar")
-    ZCODE_EXE_DEFAULT = Path(r"D:\ZCode\ZCode.exe")
+    # 现代安装器默认布局是 %LOCALAPPDATA%\Programs\ZCode；旧默认 D:\ZCode 仅在
+    # 自定义根目录安装时命中，standalone 猜错会指向不存在的文件（standalone 可用
+    # --asar / 环境变量 ZCODE_ASAR 显式指定；install.py/watchdog 拉起时经
+    # set_target() 纠正，不受默认值影响）。
+    _local = os.environ.get("LOCALAPPDATA")
+    if _local:
+        ASAR_DEFAULT = Path(_local) / "Programs" / "ZCode" / "resources" / "app.asar"
+        ZCODE_EXE_DEFAULT = ASAR_DEFAULT.parent.parent / "ZCode.exe"
+    else:
+        ASAR_DEFAULT = Path(r"D:\ZCode\resources\app.asar")
+        ZCODE_EXE_DEFAULT = Path(r"D:\ZCode\ZCode.exe")
 elif IS_MAC:
     ASAR_DEFAULT = Path("/Applications/ZCode.app/Contents/Resources/app.asar")
     ZCODE_EXE_DEFAULT = Path("/Applications/ZCode.app/Contents/MacOS/ZCode")
@@ -46,6 +61,9 @@ else:
 ASAR = ASAR_DEFAULT          # 可被 set_target() 改指其它安装位置（install.py 探测后调用）
 BAK = ASAR.with_name("app.asar.zusage.bak")
 TMP = ASAR.with_name("app.asar.zusage.tmp")
+RUNTIME_EXPLICIT = False     # set_runtime() 显式指定过运行时（install.py/watchdog 拉起时为 True；
+                             # standalone __main__ 仅在用户传了 --runtime/ZCODE_RUNTIME 时为 True）
+_STANDALONE = False          # __main__ 直接运行时置 True（被导入时恒 False，守卫不生效）
 HERE = Path(__file__).parent.resolve()
 # 运行时目录：install.py 标准安装时指向数据目录（~/.zcode/zcode-token-usage-statusbar，
 # 经 set_runtime() 切换）；独立运行本脚本或 --dev 安装时保持仓库目录（向后兼容）。
@@ -103,10 +121,11 @@ def L(zh, en):
 def set_runtime(path):
     """改运行时目录（LOADER/INJECT_LINE 随动）。ZCode 端泵的全套路径都基于 __dirname，
     运行时副本目录即自洽运行，无需改运行时代码。"""
-    global RUNTIME, LOADER, INJECT_LINE
+    global RUNTIME, LOADER, INJECT_LINE, RUNTIME_EXPLICIT
     RUNTIME = Path(path)
     LOADER = RUNTIME / "inject-main.cjs"
     INJECT_LINE = INJECT_LINE_TMPL.format(url=LOADER.as_uri())
+    RUNTIME_EXPLICIT = True
 
 
 def zcode_exe_for(asar_path):
@@ -363,6 +382,16 @@ def install(finalize=False, quiet=False):
 
     new_entry = stripped + INJECT_LINE.encode()
     if stripped != entry:
+        if _STANDALONE and not RUNTIME_EXPLICIT:
+            # standalone 场景下旧注入行指向其它运行时目录：静默重打包会把注入改指本脚本
+            # 所在目录（repo ≠ 数据目录，破坏"副本自洽"不变量）。须显式 --runtime 才放行。
+            print(L("检测到旧注入行指向其它运行时目录，而本次未显式声明 --runtime，拒绝重打包。",
+                    "Old injection line points at a different runtime dir and no --runtime was given; repack refused."))
+            print(L(f'确要改指请加参数重跑：python patch_install.py install --runtime "{RUNTIME}"',
+                    f'To re-point intentionally, re-run: python patch_install.py install --runtime "{RUNTIME}"'))
+            print(L("常规修复/收尾请直接跑 install.py（自动探测并指向数据目录）。",
+                    "For routine repair/finalize just run install.py (auto-detects and targets the data dir)."))
+            return False
         print(L("检测到旧注入行（可能指向旧目录），将替换为新路径。",
                 "Old injection line detected (possibly pointing at an old directory); it will be replaced with the new path."))
     print(L("重打包（307MB，约需十几秒）...", "repacking (307MB, takes ~10-20 seconds)..."))
@@ -388,11 +417,17 @@ def install(finalize=False, quiet=False):
             else:
                 print(L(f"\n运行中替换失败（{e}）。已弹出监控窗口：完全退出 ZCode 后会自动完成替换，",
                         f"\nReplacement while running failed ({e}). A monitor window has opened: it finishes the replacement once ZCode quits completely,"))
-                print(L("或之后手动执行：python patch_install.py install --finalize",
-                        "or run manually afterwards: python patch_install.py install --finalize"))
+                print(L(f'或之后手动执行：python patch_install.py install --finalize --asar "{ASAR}" --runtime "{RUNTIME}"',
+                        f'or run manually afterwards: python patch_install.py install --finalize --asar "{ASAR}" --runtime "{RUNTIME}"'))
             if not quiet: launch_monitor(time.time())
             return False
-    os.replace(TMP, ASAR)
+    try:
+        os.replace(TMP, ASAR)
+    except OSError as e:
+        print(L(f"\n替换失败（{e}）。", f"\nReplacement failed ({e})."))
+        print(L(f'待替换包保留在 {TMP}；完全退出 ZCode 后重跑 install --finalize，或由看门狗自动收尾。',
+                f'Pending package kept at {TMP}; quit ZCode completely and re-run install --finalize, or let the watchdog finish it.'))
+        return False
     print(L("完成。启动 ZCode 即可在窗口底部看到悬浮条。", "Done. Start ZCode and the floating bar appears at the bottom of the window."))
     cleanup_legacy_bak()
     if not quiet: launch_monitor(time.time())
@@ -438,9 +473,50 @@ def check():
     if injected:
         syntax_check(ASAR)
     if TMP.exists():
-        print(L("存在待替换 TMP:", "Pending replacement TMP exists:"), TMP, L("（退出 ZCode 后跑 install --finalize）", "(quit ZCode, then run install --finalize)"))
+        print(L("存在待替换 TMP:", "Pending replacement TMP exists:"), TMP,
+              L(f'（退出 ZCode 后跑 install --finalize --asar "{ASAR}" --runtime "{RUNTIME}"）',
+                f'(quit ZCode, then run install --finalize --asar "{ASAR}" --runtime "{RUNTIME}")'))
+
+
+def _consume_flag(argv, name):
+    """从 argv 提取 --name VALUE / --name=VALUE（多次出现取最后一次），返回 (值, 余下列表)。
+    缺值或紧随另一 flag（下一个 token 以 -- 开头）时按缺值处理，原样保留不误吞。"""
+    val, out, i = None, [], 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok == "--" + name:
+            if i + 1 < len(argv) and not argv[i + 1].startswith("--"):
+                val, i = argv[i + 1], i + 2
+                continue
+            out.append(tok)
+            i += 1
+        elif tok.startswith("--" + name + "="):
+            val, i = tok.split("=", 1)[1], i + 1
+        else:
+            out.append(tok)
+            i += 1
+    return val, out
 
 
 if __name__ == "__main__":
-    cmd = sys.argv[1] if len(sys.argv) > 1 else "check"
-    {"install": install, "remove": remove, "check": check}.get(cmd, check)()
+    _STANDALONE = True
+    argv = sys.argv[1:]
+    cmd = argv[0] if argv else "check"
+    argv = argv[1:]
+    # standalone 目标解析：--asar/--runtime 参数 > 环境变量 ZCODE_ASAR/ZCODE_RUNTIME >
+    # 平台默认。install.py / watchdog 拉起时经 set_target()/set_runtime() 已设好，此处
+    # 只服务 standalone 场景（默认路径猜错的自定义安装布局，见 ASAR_DEFAULT 注释）。
+    asar_arg, argv = _consume_flag(argv, "asar")
+    if not asar_arg:
+        asar_arg = os.environ.get("ZCODE_ASAR")
+    runtime_arg, argv = _consume_flag(argv, "runtime")
+    if not runtime_arg:
+        runtime_arg = os.environ.get("ZCODE_RUNTIME")
+    finalize = "--finalize" in argv
+    argv = [t for t in argv if t != "--finalize"]
+    if asar_arg:
+        set_target(Path(os.path.expandvars(asar_arg)).expanduser())
+    if runtime_arg:
+        set_runtime(Path(os.path.expandvars(runtime_arg)).expanduser())
+    ok = {"install": lambda: install(finalize=finalize), "remove": remove, "check": check}.get(cmd, check)()
+    sys.exit(0 if ok is not False else 1)
