@@ -1,0 +1,21 @@
+{
+  "description": "zusage 插件壳：会话启动同步运行时文件（仓库→数据目录，字节比较内容不变不写；/usage 命令模板随动）并做一次注入自检（与 10 分钟计划任务 watchdog 同一实现：缺失自动重打，客户端运行中暂存+通知）；任何异常吞掉后静默退出，绝不阻断会话。",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "process",
+            "command": "python",
+            "args": [
+              "${ZCODE_PLUGIN_ROOT}/hooks/session-start.py"
+            ],
+            "timeoutMs": 60000,
+            "statusMessage": "zusage: 运行时同步与注入自检…"
+          }
+        ]
+      }
+    ]
+  }
+}

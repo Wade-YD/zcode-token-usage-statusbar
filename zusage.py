@@ -626,16 +626,30 @@ def _light_snapshot(con, sid, cfg):
     }
 
 
+def hides_reasoning(model_id):
+    """Claude 系列不单独上报思考 token：reasoning_tokens 恒为 0，output_tokens 却已含思考，
+    且思考在 first_token_at 之前流出。按首字窗口计时会把思考期漏出分母、速率虚高
+    （上游 2026-10-15 真库：claude-opus-5-5 有 35% 请求按首字窗口超 300 tok/s），
+    须同含思考段一样从 started_at 起算。"""
+    return "claude" in (model_id or "").lower()
+
+
 def rate_of(row):
     """单次调用的速度分解（状态条 / CLI / MCP 共用的唯一实现）。
 
-    row = (output_tokens, reasoning_tokens, duration_ms, first_token_at, completed_at)
+    row = (output_tokens, reasoning_tokens, duration_ms, first_token_at, completed_at,
+           started_at, model_id)
     返回 (tps, tps_visible, basis)：
-      tps         生成速度 = output ÷（首 token → 完成）；无首字时间时退化为端到端（总耗时）
-      tps_visible 可见文本速度 =（output − reasoning）÷ 同一时间窗；reasoning=0 时为 None
-      basis       'decode'（有首字时间）/ 'e2e'（端到端回退）/ None（数据不足）
+      tps         生成速度 = output ÷ 生成窗口；含思考（reasoning>0，或 Claude 系列
+                  这类不单独上报思考的模型，见 hides_reasoning）且 started_at 可用时
+                  窗口前移到 started_at——思考 token 在首字之前流出，按首字窗口会把
+                  思考期漏出分母、速率虚高；无首字时间时退化为端到端（总耗时）
+      tps_visible 可见文本速度 =（output − reasoning）÷ 首字窗口（口径不随前移变）；
+                  reasoning=0 时为 None
+      basis       'decode'（有首字时间戳，窗口可能因含思考前移）/ 'e2e'（端到端回退）/
+                  None（数据不足）
     """
-    out, rea, dur, fta, ca = row
+    out, rea, dur, fta, ca, sa, model = row
     if not out:
         return (None, None, None)
     if fta and ca and ca > fta:
@@ -644,8 +658,13 @@ def rate_of(row):
         gen, basis = dur / 1000.0, "e2e"
     else:
         return (None, None, None)
+    vis_gen = gen
+    if (rea or hides_reasoning(model)) and sa and ca and ca > sa:
+        gen = (ca - sa) / 1000.0   # 含思考窗口前移：把首字之前的思考期计入分母
+    if gen <= 0:
+        return (None, None, None)
     tps = round(out / gen, 1)
-    vis = round((out - rea) / gen, 1) if rea and out > rea else None
+    vis = round((out - rea) / vis_gen, 1) if rea and out > rea else None
     return (tps, vis, basis)
 
 
@@ -659,7 +678,7 @@ def speed_stats(con, sid=None, window=10, min_coverage=0.8):
     params = (sid, window) if sid else (window,)
     rows = con.execute(
         f"""select output_tokens, coalesce(reasoning_tokens,0), duration_ms,
-                   first_token_at, completed_at
+                   first_token_at, completed_at, started_at, model_id
             from model_usage where status='completed' and output_tokens>0{where}
             order by completed_at desc limit ?""", params).fetchall()
     dec, e2e, vis, ttfts = [], [], [], []
@@ -692,7 +711,8 @@ def _session_snapshot(con, sid, cfg):
     u = session_usage(con, sid)
     last = con.execute(
         """select duration_ms, coalesce(time_to_first_token_ms,0), completed_at, turn_id, model_id,
-                  output_tokens, first_token_at, coalesce(reasoning_tokens,0) as reasoning_tokens
+                  output_tokens, first_token_at, coalesce(reasoning_tokens,0) as reasoning_tokens,
+                  started_at
            from model_usage where session_id=? and status='completed'
            order by completed_at desc limit 1""",
         (sid,),
@@ -733,13 +753,16 @@ def _session_snapshot(con, sid, cfg):
     lr = con.execute("select max(completed_at) from model_usage where session_id=?", (sid,)).fetchone()
     active = bool(lr and lr[0] and int(time.time() * 1000) - lr[0] < SESSION_TIMEOUT_MS)
     ctx_auto = lookup_context_window(last["model_id"]) if last else None
-    # 生成速度：输出 token ÷ 生成耗时（首 token 之后到完成；无 first_token_at 时退化端到端）。
+    # 生成速度：输出 token ÷ 生成耗时；含思考（或 Claude 系列不单独上报思考）且
+    # started_at 可用时窗口前移到 started_at（见 rate_of/hides_reasoning）；
+    # 无 first_token_at 时退化端到端。
     # 与 CLI/MCP 聚合口径共用 rate_of() 同一实现（spec: speed-metrics 多出口一致）。
     tps, tps_visible, speed_basis = (0, None, None)
     if last and last["output_tokens"]:
         tps, tps_visible, speed_basis = rate_of(
             (last["output_tokens"], last["reasoning_tokens"], last["duration_ms"],
-             last["first_token_at"], last["completed_at"]))
+             last["first_token_at"], last["completed_at"], last["started_at"],
+             last["model_id"]))
         tps = tps or 0
     sub_rows = con.execute(
         """select m.session_id, coalesce(m.agent,''), coalesce(s2.title,''), count(*),

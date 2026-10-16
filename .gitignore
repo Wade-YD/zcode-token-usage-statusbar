@@ -12,3 +12,4 @@ config.json
 .mimosa/
 watchdog.log
 watchdog-state.json
+plugin/hooks/session-start.err.log
