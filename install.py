@@ -132,6 +132,37 @@ def expand(p):
     return Path(os.path.expandvars(os.path.expanduser(p)))
 
 
+def _decode_console(b):
+    """Windows 控制台程序（schtasks/tasklist/powershell）按本地 ANSI 代码页输出
+    （中文系统=GBK），而 Python 3.14+/UTF-8 模式下 text=True 默认按 UTF-8 解码，
+    会在读线程抛 UnicodeDecodeError 丢掉整个结果。mbcs→utf-8→replace 依次兜底，
+    任何 locale 都不再崩。"""
+    if not b:
+        return ""
+    if os.name == "nt":
+        try:
+            return b.decode("mbcs")
+        except (UnicodeDecodeError, LookupError):
+            pass
+    try:
+        return b.decode("utf-8")
+    except UnicodeDecodeError:
+        return b.decode(errors="replace")
+
+
+def run_text(cmd, timeout=None, env=None):
+    """subprocess.run 的文本安全版：按字节捕获后走 _decode_console 兜底解码，
+    返回的 CompletedProcess 与 text=True 同构（stdout/stderr 为 str）。
+    cmd 必须是字符串参数列表，绝不走 shell（无拼接、无 shell=True）。"""
+    if not isinstance(cmd, (list, tuple)) or not all(isinstance(a, str) for a in cmd):
+        raise TypeError("run_text 仅接受字符串参数列表（不走 shell）")
+    r = subprocess.run(list(cmd), shell=False, capture_output=True,
+                       timeout=timeout, env=env)
+    r.stdout = _decode_console(r.stdout)
+    r.stderr = _decode_console(r.stderr)
+    return r
+
+
 def load_lang_from_config(dev):
     """已有 config.json 里存了 lang 就沿用（--dev 时 config 在仓库目录）。"""
     cfg = HERE / "config.json" if dev else DATA_DIR / "config.json"
@@ -425,10 +456,9 @@ def register_watchdog(dry, dev):
     if dry:
         return True
     try:
-        r = subprocess.run(
+        r = run_text(
             ["schtasks", "/Create", "/F", "/TN", WATCHDOG_TASK, "/SC", "MINUTE", "/MO", "10",
-             "/TR", f'"{py}" "{script}"'],
-            capture_output=True, text=True)
+             "/TR", f'"{py}" "{script}"'])
     except OSError as e:
         print(L(f"[看门狗] 注册失败：{e}", f"[watchdog] register failed: {e}"))
         return False
@@ -444,8 +474,7 @@ def remove_watchdog(dry):
     if dry:
         return True
     try:
-        subprocess.run(["schtasks", "/Delete", "/F", "/TN", WATCHDOG_TASK],
-                       capture_output=True, text=True)
+        run_text(["schtasks", "/Delete", "/F", "/TN", WATCHDOG_TASK])
     except OSError:
         pass
     return True
