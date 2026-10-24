@@ -125,22 +125,20 @@ def main():
             lines = [L("[!] 无法检测 ZCode 进程（探测命令不可用）。",
                        "[!] Cannot detect ZCode processes (detection command unavailable).")]
         elif TMP.exists():
-            # 运行中替换失败的收尾：ZCode 一退出就自动替换，无需计划任务
-            if not pids:
-                if finalize_tmp():
-                    lines = [L("[OK] ZCode 已退出，asar 替换完成。", "[OK] ZCode has exited; app.asar replacement finished."),
-                             "",
-                             L("请启动 ZCode，悬浮条即可显示。", "Start ZCode and the floating bar will appear.")]
-                else:
-                    lines = [L("[!] ZCode 已退出但替换失败（文件仍被占用？）",
-                               "[!] ZCode has exited but the replacement failed (file still locked?)"),
-                             L("稍后自动重试；也可手动执行：", "Will retry automatically; you can also run manually:"),
-                             "  python patch_install.py install --finalize"]
+            # 运行中替换失败的收尾：直接尝试替换——asar 不再被占用即成功
+            # （不按"进程数为 0"判定：Electron 退出后常残留 crashpad/tray 存根进程，
+            #   它们不锁 asar；真被占用时 10 秒后自动重试）
+            if finalize_tmp():
+                lines = [L("[OK] asar 已解锁，替换完成。",
+                           "[OK] app.asar is unlocked; replacement finished."),
+                         "",
+                         L("请启动 ZCode，悬浮条即可显示。",
+                           "Start ZCode and the floating bar will appear.")]
             else:
-                lines = [L("[等待] 有待替换文件，请完全退出 ZCode。",
-                           "[waiting] A pending replacement file exists; please exit ZCode completely."),
-                         L("退出后本窗口将自动完成 asar 替换。",
-                           "This window will finish the asar replacement automatically once you exit."),
+                lines = [L("[等待] asar 仍被运行中的 ZCode 占用。",
+                           "[waiting] app.asar is still held by the running ZCode."),
+                         L("完全退出 ZCode 后本窗口自动完成替换（残留小进程不影响）。",
+                           "Quit ZCode completely and this window finishes the replacement automatically (leftover stub processes are fine)."),
                          "", L("当前 ZCode 进程数：%d" % len(pids), "Current ZCode process count: %d" % len(pids))]
         elif not pids:
             lines = [L("ZCode 未运行。启动 ZCode 后悬浮条即生效。",

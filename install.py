@@ -95,7 +95,7 @@ COMMANDS_DIR = real_home() / ".zcode" / "commands"
 MCP_NAME = "zcode-token-usage-statusbar"   # MCP server 注册名（与仓库名一致；老安装叫 token-usage/zusage，自动迁移）
 MCP_NAME_OLD = ("token-usage", "zusage")   # 历史注册名
 RUNTIME_FILES = ("inject-main.cjs", "overlay.js", "zusage.py", "zquota.py", "usage_mcp.py",
-                 "watchdog.py", "install.py", "patch_install.py")
+                 "watchdog.py", "install.py", "patch_install.py", "install_monitor.py")
 WATCHDOG_TASK = "zusage-watchdog"
 
 # ZCode 安装位置候选：resources/app.asar 存在即命中（按序探测，按当前平台取组）

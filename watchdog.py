@@ -148,19 +148,19 @@ def main(verbose: bool) -> int:
 
     stamp = f"staged@{int(asar.stat().st_mtime)}"
     if st.get("staged_key") == stamp:
-        # 暂存收尾（P0-3）：ZCode 已退出即可原子替换；.tmp 被清走则复位，下周期重新打包
-        if pi.TMP.is_file() and not zcode_running():
+        # 暂存收尾（P0-3）：直接尝试原子替换，失败=asar 仍被锁，留待下周期。
+        # 不按"tasklist 无 ZCode 进程"判定收尾：Electron 退出后常残留 crashpad/tray
+        # 存根进程（不锁 asar），按进程表等会永远等不下去（实测 21 个残留进程卡收尾）。
+        if pi.TMP.is_file():
             try:
                 os.replace(pi.TMP, pi.ASAR)
-                log("ZCode 已退出，暂存修复收尾完成")
+                log("asar 已解锁，暂存修复收尾完成")
                 state_save({})
             except OSError as e:
-                log(f"收尾失败（ZCode 仍占用？）：{e}")
-        elif not pi.TMP.is_file():
+                log(f"收尾暂不可行（asar 仍被占用）：{e}")
+        else:
             log(".tmp 消失（被外部清理？），复位状态")
             state_save({})
-        else:
-            log("ZCode 仍在运行，暂存修复继续等待")
         return 0
     log("检测到注入行缺失（多半是 ZCode 升级覆盖了 asar），自动重打")
     running = zcode_running()

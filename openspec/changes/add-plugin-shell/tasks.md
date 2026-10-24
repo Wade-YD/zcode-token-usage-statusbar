@@ -33,3 +33,5 @@
 
 - [x] 5.1 控制台输出解码崩溃：中文 Windows + Python 3.14/UTF-8 模式下 `text=True` 默认按 UTF-8 解码 schtasks/tasklist/powershell 的 GBK 输出，读线程抛 UnicodeDecodeError 丢掉整个结果（任务实际已注册成功）——install.py 增 `run_text`（字节捕获 + `_decode_console` mbcs→utf-8→replace 兜底；参数列表类型校验 + 显式 shell=False），调用点全切换：install.py register_watchdog/remove_watchdog、patch_install.py client_running（替换硬编码 encoding="gbk"）/语法检查/_delete_watchdog_task、zusage.py doctor 泵进程检测；install_monitor.py 原有 decode("gbk","replace") 输出纯 ASCII CSV 字段、不会崩，保持不动
 - [x] 5.2 解码验证：`_decode_console` GBK 字节单测（b"\xd6\xd0\xce\xc4"→"中文"）+ run_text 拒绝非列表 cmd + 真实 schtasks 查询走通（本机 zh-CN）+ 重跑主安装 stderr 无 UnicodeDecodeError
+- [x] 5.3 暂存收尾门槛修复（看门狗 + 安装监控窗）：收尾条件从"tasklist 无 ZCode 进程"改为"直接尝试原子替换、文件锁失败留下周期重试"——Electron 退出后常残留 crashpad/tray 存根进程（不锁 asar），按进程表等会永远等不下去（实测 21 个残留进程卡收尾 10+ 小时，用户退出重开仍无状态条的根因）；self-heal 规格"文件锁时留待下一周期收尾"语义不受影响（本就更贴合）。验证：ZCode 全程运行中（真实进程存活）假 asar 暂存替换成功（state 复位、log"asar 已解锁"）；真机钩子重跑后 log 如期"收尾暂不可行（asar 仍被占用）"，exit 0、err.log 零新增
+- [x] 5.4 安装监控脚本补入 RUNTIME_FILES（原清单缺它 → 标准安装的数据目录没有此文件 → 拉起处 `if not monitor.exists(): return` 静默跳过，10 秒轮询收尾器在标准安装从未生效，安装器"已弹出监控窗口"输出名不副实）——清单 8→9 文件；仓库形态钩子同步 10 文件验证落位、逐字节一致
