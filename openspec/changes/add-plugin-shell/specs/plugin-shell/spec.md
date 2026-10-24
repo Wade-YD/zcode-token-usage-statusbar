@@ -10,8 +10,19 @@
 - **THEN** SessionStart 钩子被执行，既有状态条、额度与 MCP 功能不受影响
 
 #### Scenario: 市场安装形态
-- **WHEN** 插件经市场安装到无仓库根的位置
-- **THEN** 运行时同步静默跳过，注入自检仍走数据目录副本
+- **WHEN** 插件经市场安装到无仓库根的位置，且数据目录已有运行时
+- **THEN** 运行时同步静默跳过，注入自检仍走数据目录副本；数据目录缺运行时则触发引导安装（见下）
+
+### Requirement: 市场形态引导安装
+市场形态下 SessionStart 钩子检测到数据目录缺 watchdog.py 时 MUST 自动引导安装：从官方仓库 GitHub main 分支 tarball 下载（仅 https + 固定域名白名单、拒绝 IP 字面量主机、体积上限 20MB、重定向逐跳校验），两阶段落地——先取 install.py 解析权威 DATA_DIR/RUNTIME_FILES，再同步全套运行时与 /usage 命令模板到数据目录，并仅当缺失时补写最小 config.json（只含 python_path）。引导安装 MUST NOT 注册 MCP 或计划任务（仍属 install.py 主安装），MUST NOT 触碰已存在的用户 config.json。引导失败 MUST 留痕 err.log 并进入 6 小时冷却（冷却期内的会话启动不得发起网络请求）；仓库形态或数据目录已有 watchdog.py 时不触发下载。
+
+#### Scenario: 市场安装后首次会话
+- **WHEN** 用户仅经插件市场安装（从未运行 install.py）且网络可达，启动会话
+- **THEN** 钩子下载运行时到数据目录、/usage 命令模板与最小 config.json 就位，注入自检照常执行（ZCode 运行中则暂存+通知，与计划任务语义一致）
+
+#### Scenario: 离线环境
+- **WHEN** 网络不可达时启动会话
+- **THEN** 本次引导失败仅留痕 err.log，会话照常启动，且 6 小时内的后续会话启动不再重复发起下载
 
 ### Requirement: 会话启动同步与自检
 SessionStart（startup|resume）钩子 MUST：① 按 RUNTIME_FILES 清单（以仓库 install.py 为唯一权威定义）把仓库运行时同步到数据目录，字节比较、内容不变不写；② 同步 /usage 命令模板到全局命令目录；③ 以数据目录 watchdog（与计划任务同一实现）执行一次注入自检，修复行为（重打/暂存/通知防抖）与计划任务完全一致。
