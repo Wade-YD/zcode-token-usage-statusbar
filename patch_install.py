@@ -37,6 +37,8 @@ import tempfile
 import time
 from pathlib import Path
 
+from install import run_text   # 同级兄弟（RUNTIME_FILES 恒同目录）：控制台输出本地代码页安全解码
+
 IS_WIN = sys.platform == "win32"
 IS_MAC = sys.platform == "darwin"
 
@@ -157,9 +159,8 @@ def set_target(asar_path):
 def client_running():
     try:
         if IS_WIN:
-            out = subprocess.run(
+            out = run_text(
                 ["tasklist", "/FI", "IMAGENAME eq ZCode.exe"],
-                capture_output=True, text=True, encoding="gbk", errors="replace",
             ).stdout
             return "ZCode.exe" in out
         # macOS/Linux：pgrep 精确匹配主进程名；误判"未运行"在 POSIX 上也无害
@@ -323,7 +324,7 @@ def syntax_check(asar_path: Path):
     tmp_js.write_bytes(src)
     env = dict(os.environ, ELECTRON_RUN_AS_NODE="1")
     try:
-        r = subprocess.run([str(exe), "--check", str(tmp_js)], capture_output=True, text=True, env=env)
+        r = run_text([str(exe), "--check", str(tmp_js)], env=env)
     except OSError as e:
         r = None
         run_err = str(e)
@@ -340,8 +341,7 @@ def syntax_check(asar_path: Path):
 def _delete_watchdog_task():
     """删除本工具注册的计划任务（zusage-watchdog）。用户显式卸载后，看门狗不得再自动重打注入。"""
     try:
-        subprocess.run(["schtasks", "/Delete", "/F", "/TN", "zusage-watchdog"],
-                       capture_output=True, text=True)
+        run_text(["schtasks", "/Delete", "/F", "/TN", "zusage-watchdog"])
     except OSError:
         pass
 

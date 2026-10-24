@@ -1176,10 +1176,11 @@ def doctor(net=False):
         add("diag 存在", False, "运行时目录没有 diag-*.json（状态条从未加载，重跑 install.py）")
 
     try:
-        out = subprocess.run(
+        from install import run_text   # powershell 输出走本地代码页；text=True 在 UTF-8 模式下会崩
+        out = run_text(
             ["powershell", "-NoProfile", "-Command",
              "(Get-CimInstance Win32_Process | Where-Object { $_.Name -like 'python*' -and $_.CommandLine -like '*zusage.py*serve*' } | Measure-Object).Count"],
-            capture_output=True, text=True, timeout=15)
+            timeout=15)
         cnt = int(out.stdout.strip() or 0)
         add("泵进程（尽力而为）", True,
             f"{cnt} 个" + ("（一次性回退模式或空闲期可能为 0，仅提示）" if cnt == 0 else ""))

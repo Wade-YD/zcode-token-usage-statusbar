@@ -15,7 +15,9 @@
      命令模板 + 最小 config.json（仅缺失时补 python_path）。MCP 注册与计划任务
      仍属 install.py 主安装。下载硬约束：仅 https + 固定域名白名单（拒绝 IP
      字面量，环回/私有/保留段全覆盖）、体积上限 20MB、重定向逐跳校验；失败留痕
-     并进入 6 小时冷却（防离线环境下每次会话启动都空等网络超时）。
+     并进入 6 小时冷却（防离线环境下每次会话启动都空等网络超时）。数据目录已有
+     运行时则以 ≥24 小时间隔在线刷新（同一受控通道；字节比较内容不变不写；失败
+     退避 1 小时，留痕数据目录 watchdog.log）。
   3) 注入自检：调数据目录 watchdog.main(False)——与计划任务同一实现（精确
      匹配、暂存收尾、通知防抖），会话启动即查一次，早于 10 分钟周期。
 
@@ -50,6 +52,8 @@ MAX_DOWNLOAD = 20 * 1024 * 1024    # tarball 体积上限（仓库实际 ~1MB；
 DOWNLOAD_TIMEOUT = 20              # 秒；钩子总预算见 hooks.json timeoutMs（60s）
 BOOT_STATE = PLUGIN_ROOT / "hooks" / "bootstrap-state.json"
 BOOT_RETRY_SECS = 6 * 3600         # 引导失败冷却：离线/被墙时别让每次会话启动都等满超时
+BOOT_REFRESH_SECS = 24 * 3600      # 市场形态运行时刷新检查间隔（拉远端做字节比较）
+BOOT_REFRESH_RETRY_SECS = 3600     # 刷新失败退避：1 小时后重试（区别于引导安装的 6h 大冷却）
 
 
 def _paths():
@@ -190,26 +194,17 @@ def _boot_state_save(data):
         pass   # 状态写不进（只读目录？）：最坏结果是冷却失效，多试几次下载而已
 
 
-def bootstrap_runtime(default_data_dir):
-    """市场形态引导安装：下载 main tarball → 同步全套运行时 + /usage 命令模板 +
-    最小 config.json（仅缺失时）。返回 (data_dir, 写入文件名列表)。失败进入冷却
-    （BOOT_RETRY_SECS）；冷却期内的会话启动直接抛错留痕，不再碰网络。"""
-    st = _boot_state_load()
-    now = time.time()
-    last = float(st.get("last_attempt") or 0)
-    if now - last < BOOT_RETRY_SECS:
-        remain = int((BOOT_RETRY_SECS - (now - last)) / 60)
-        raise RuntimeError(f"市场形态引导安装冷却中（约 {remain} 分钟后重试）；数据目录仍缺运行时")
-    _boot_state_save({"last_attempt": now,
-                      "last_attempt_at": time.strftime("%m-%d %H:%M:%S")})
-    raw = _download(DOWNLOAD_URL)
-
-    # 两阶段：install.py 先落地数据目录（它本就是 RUNTIME_FILES 一员），再从它取权威清单
+def _apply_tarball(raw, data_dir, with_min_config):
+    """把 main tarball 两阶段落到数据目录：install.py 先落地（它本就是 RUNTIME_FILES
+    一员），再从它取权威 DATA_DIR/RUNTIME_FILES 同步全套运行时 + /usage 命令模板。
+    with_min_config 仅引导安装用（config.json 缺失时补 python_path）。字节比较，
+    内容不变不写（泵按 mtime 热重载，无谓复制会引发空重启）。返回 (data_dir,
+    写入文件名列表)。"""
     members = _tar_members(raw, {"install.py"})
     synced = []
-    if _write_if_changed(members["install.py"], default_data_dir / "install.py"):
+    if _write_if_changed(members["install.py"], data_dir / "install.py"):
         synced.append("install.py")
-    data_dir, runtime_files = _load_manifest(default_data_dir / "install.py")
+    data_dir, runtime_files = _load_manifest(data_dir / "install.py")
 
     members = _tar_members(raw, set(runtime_files) | {COMMAND_NAME})
     for name in runtime_files:
@@ -220,15 +215,68 @@ def bootstrap_runtime(default_data_dir):
     if _write_if_changed(members[COMMAND_NAME], Path.home() / ".zcode" / "commands" / "usage.md"):
         synced.append(COMMAND_NAME)
 
-    # 最小 config.json：只补 python_path（泵要拉起 python 跑额度查询），其余键组件
-    # 自带默认；已存在的用户配置不动。完整配置/MCP 注册仍由 install.py 主安装提供。
-    cfg = data_dir / "config.json"
-    if not cfg.is_file():
-        _write_if_changed(json.dumps({"python_path": sys.executable}, indent=2).encode("utf-8"), cfg)
-
-    _boot_state_save({"last_attempt": now, "ok": True, "synced": synced,
-                      "at": time.strftime("%m-%d %H:%M:%S")})
+    if with_min_config:
+        # 最小 config.json：只补 python_path（泵要拉起 python 跑额度查询），其余键组件
+        # 自带默认；已存在的用户配置不动。完整配置/MCP 注册仍由 install.py 主安装提供。
+        cfg = data_dir / "config.json"
+        if not cfg.is_file():
+            _write_if_changed(json.dumps({"python_path": sys.executable}, indent=2).encode("utf-8"), cfg)
     return data_dir, synced
+
+
+def bootstrap_runtime(default_data_dir):
+    """市场形态引导安装：下载 main tarball → _apply_tarball（含最小 config.json）。
+    返回 (data_dir, 写入文件名列表)。失败进入冷却（BOOT_RETRY_SECS）；冷却期内的
+    会话启动直接抛错留痕，不再碰网络。"""
+    st = _boot_state_load()
+    now = time.time()
+    last = float(st.get("last_attempt") or 0)
+    if now - last < BOOT_RETRY_SECS:
+        remain = int((BOOT_RETRY_SECS - (now - last)) / 60)
+        raise RuntimeError(f"市场形态引导安装冷却中（约 {remain} 分钟后重试）；数据目录仍缺运行时")
+    st.update(last_attempt=now, last_attempt_at=time.strftime("%m-%d %H:%M:%S"))
+    _boot_state_save(st)
+    raw = _download(DOWNLOAD_URL)
+    data_dir, synced = _apply_tarball(raw, default_data_dir, with_min_config=True)
+    st = _boot_state_load()   # 重读再合并：防覆盖期间其它进程写入的刷新键
+    st.update(last_attempt=now, ok=True, synced=synced,
+              at=time.strftime("%m-%d %H:%M:%S"),
+              last_refresh=now)   # 播种刷新时钟：引导刚拉完远端，不当场再检查一次
+    _boot_state_save(st)
+    return data_dir, synced
+
+
+def refresh_runtime(data_dir):
+    """市场形态运行时刷新：数据目录已有运行时时，距上次检查 ≥24h（上次失败则按
+    1h 退避）拉 main tarball，与引导安装同一受控下载通道，字节比较同步。未到检查
+    期返回 None（零网络）；失败返回 []、数据目录 watchdog.log 留痕并置 refresh_error
+    （检查间隔随之为 1h；不写 err.log——刷新失败不属钩子核心职责失败，注入自检
+    照常执行）；成功返回实际写入的文件名列表。绝不触碰 config.json，不注册 MCP/
+    计划任务。仓库形态不做在线刷新（本地仓库同步即权威）。"""
+    st = _boot_state_load()
+    now = time.time()
+    interval = BOOT_REFRESH_RETRY_SECS if st.get("refresh_error") else BOOT_REFRESH_SECS
+    if now - float(st.get("last_refresh") or 0) < interval:
+        return None
+    st["last_refresh"] = now   # 先落检查时钟：进程中途被杀也不会下轮会话启动立刻重拉
+    _boot_state_save(st)
+    try:
+        raw = _download(DOWNLOAD_URL)
+        _, synced = _apply_tarball(raw, data_dir, with_min_config=False)
+    except BaseException as exc:
+        st["refresh_error"] = f"{exc.__class__.__name__}: {exc}"[:200]
+        _boot_state_save(st)   # last_refresh 已是本次尝试时间；间隔因 refresh_error 变 1h
+        _log_sync(data_dir, "插件钩子运行时刷新失败（%s），1 小时后重试" % exc.__class__.__name__)
+        return []
+    st = _boot_state_load()
+    st.pop("refresh_error", None)
+    st.update(last_refresh=now, last_refresh_at=time.strftime("%m-%d %H:%M:%S"),
+              refresh_synced=list(synced))
+    _boot_state_save(st)
+    if synced:
+        _log_sync(data_dir, "插件钩子运行时刷新写入 %d 个文件：%s"
+                  % (len(synced), ", ".join(synced)))
+    return synced
 
 
 def _log_err():
@@ -267,6 +315,9 @@ def main():
             data_dir, synced = bootstrap_runtime(data_dir)
             _log_sync(data_dir, "插件钩子引导安装（GitHub main）写入 %d 个文件：%s"
                       % (len(synced), ", ".join(synced)))
+        else:
+            # 市场形态 + 已有运行时 → 到期则在线刷新（检查期内零网络）
+            refresh_runtime(data_dir)
         sys.path.insert(0, str(data_dir))
         import watchdog
         watchdog.main(False)   # 注入自检：与计划任务同一实现（verbose=False 收输出）
