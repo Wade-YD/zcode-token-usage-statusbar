@@ -1136,7 +1136,15 @@ def doctor(net=False):
     runtime = Path.home() / ".zcode" / "zcode-token-usage-statusbar"
     if (runtime / "overlay.js").is_file():
         here = runtime   # 标准安装：检查数据目录副本（真正在运行的那份）
-    need = ("inject-main.cjs", "overlay.js", "zusage.py", "zquota.py", "usage_mcp.py")
+    try:
+        # 清单唯一权威定义处是 install.py 的 RUNTIME_FILES（随运行时复制到数据目录）；
+        # 导入失败（老安装/被裁剪）时退回本文件内置的最小清单，不让自检本身崩掉。
+        sys.path.insert(0, str(here))
+        import install as _installer
+        need = tuple(_installer.RUNTIME_FILES)
+    except Exception:
+        need = ("inject-main.cjs", "overlay.js", "zusage.py", "zquota.py", "usage_mcp.py",
+                "runtime_lock.py")
     miss = [f for f in need if not (here / f).is_file()]
     add("运行时文件齐全", not miss,
         ("缺: " + ", ".join(miss) + "（重跑 install.py）") if miss else f"{len(need)}/{len(need)}")

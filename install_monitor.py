@@ -94,9 +94,16 @@ def diag_fresh(since):
 def finalize_tmp():
     try:
         os.replace(TMP, ASAR)
-        return True
     except OSError:
         return False
+    # 替换成功 → 给重启意图盖「已发布」章（与 install() 共用同一把锁；缺模块时忽略）
+    try:
+        sys.path.insert(0, str(HERE))
+        import patch_install
+        patch_install.publish_staged()
+    except Exception:
+        pass
+    return True
 
 
 def draw(lines):

@@ -16,7 +16,8 @@
 "use strict";
 const path = require("path");
 const fs = require("fs");
-const { spawn } = require("child_process");
+const { spawn, execFile } = require("child_process");
+const { createHash } = require("crypto");
 const { app, BrowserWindow, webContents } = require("electron");
 
 const HERE = __dirname;   // 本 loader 被 asar 注入行按绝对 file:// URL import，__dirname 即真实目录（克隆到任意路径无需改代码）
@@ -24,6 +25,27 @@ const CONFIG = path.join(HERE, "config.json");
 const OVERLAY = path.join(HERE, "overlay.js");
 const ZUSAGE = path.join(HERE, "zusage.py");
 const LOG = (...a) => console.error("[zusage]", ...a);
+
+/* 已加载哈希上报（v11 重启闭环）：数据目录里的文件被换新 ≠ 本进程已加载新代码。
+ * 启动时把「本进程实际读到的」冷文件哈希报给 runtime_lock.py，只有哈希一致的条目
+ * 才被清除——于是「已修复待重启」与「修复失败/替换未落地」在状态上可区分，
+ * 不再靠看门狗盲查重打。_loadedAt 取进程启动时刻：早于意图的进程不替新标记背书。 */
+const COLD_FILES = ["inject-main.cjs"];
+const loadedHashes = { _loadedAt: Date.now() - process.uptime() * 1000 };
+for (const name of COLD_FILES) {
+  try { loadedHashes[name] = createHash("sha256").update(fs.readFileSync(path.join(HERE, name))).digest("hex"); }
+  catch (e) { LOG("startup fingerprint unavailable:", name, e.message); }
+}
+function acknowledgeRestart() {
+  const helper = path.join(HERE, "runtime_lock.py");
+  if (!fs.existsSync(helper)) return;
+  try {
+    execFile(readCfg().python_path || "python",
+      [helper, "--ack-restart", HERE, JSON.stringify(loadedHashes)],
+      { windowsHide: true, timeout: 15000, maxBuffer: 65536 },
+      (error) => { if (error) LOG("restart acknowledgement failed:", error.message); });
+  } catch (e) { LOG("restart acknowledgement failed:", e.message); }
+}
 
 function readCfg() {
   const c = { python_path: "python", resident: true };
@@ -365,26 +387,30 @@ function watchDb() {
 
 /* overlay / zusage.py 热更新检查（stat mtime，开销可忽略）；config.hot_reload=false 可关闭
  * （发布/稳定形态：改文件需重启 ZCode 才生效），开关改动随下次心跳生效。
- * zusage.py 变化时重启常驻进程（serve 进程驻内存的是旧代码）；顺带 stat config mtime。 */
-let overlayMtimeKnown = false;
-let zusageMtime = 0;
+ * 常驻 python 的热更新面 = zusage.py 本体 + 它 import 的 zquota.py：只盯前者会漏掉
+ * 额度模块改动（驻留进程里是旧模块，改完代码行为不变）。 */
+const PY_HOT = [ZUSAGE, path.join(HERE, "zquota.py")];
+const pyMtimes = new Map();
 setInterval(() => {
   const cfg = readCfgCached();
   if (cfg.hot_reload === false) return;
   hotReloadIfChanged();
-  try {
-    const m = fs.statSync(ZUSAGE).mtimeMs;
-    if (overlayMtimeKnown && m !== zusageMtime && pyRes) {
-      LOG("zusage.py changed, restarting resident python");
-      killResidentForUpgrade();
-    }
-    zusageMtime = m;
-    overlayMtimeKnown = true;
-  } catch (e) { }
+  let changed = false;
+  for (const f of PY_HOT) {
+    let m;
+    try { m = fs.statSync(f).mtimeMs; } catch (e) { continue; }
+    if (pyMtimes.has(f) && pyMtimes.get(f) !== m) changed = true;
+    pyMtimes.set(f, m);
+  }
+  if (changed && pyRes) {
+    LOG("python runtime changed, restarting resident");
+    killResidentForUpgrade();
+  }
 }, 2000);
 setInterval(maybeSpawn, Math.max(10000, readCfg().heartbeat_ms | 0 || 30000));   // 兜底心跳：防文件事件丢失
 watchDb();
 maybeSpawn();   // 启动先拉一次
+acknowledgeRestart();   // 向重启标记回执「本进程实际加载了哪些哈希」
 
 function injectOverlay(wc) {
   if (!overlaySrc || !isMainWindowState(wc)) return;
@@ -400,4 +426,4 @@ const hook = (wc) => {
 app.on("web-contents-created", (e, wc) => hook(wc));
 for (const wc of webContents.getAllWebContents()) hook(wc);
 
-LOG("injected v10 (per-pane wants array), resident query mode + remote SSH datasource (per-window active session via IPC, fs.watch db dir, remote poll_ms while remote session focused, zusage serve + one-shot fallback, activity_min_ms/heartbeat_ms, query timeout 15s)");
+LOG("injected v11 (per-pane wants array, restart-marker ack, zquota.py hot restart), resident query mode + remote SSH datasource (per-window active session via IPC, fs.watch db dir, remote poll_ms while remote session focused, zusage serve + one-shot fallback, activity_min_ms/heartbeat_ms, query timeout 15s)");

@@ -154,6 +154,7 @@ def main(verbose: bool) -> int:
         if pi.TMP.is_file():
             try:
                 os.replace(pi.TMP, pi.ASAR)
+                pi.publish_staged()   # 给重启意图盖「已发布」章（否则 ack 永远拒绝清除）
                 log("asar 已解锁，暂存修复收尾完成")
                 state_save({})
             except OSError as e:

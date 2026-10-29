@@ -35,9 +35,15 @@ import subprocess
 import sys
 import tempfile
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 from install import run_text   # 同级兄弟（RUNTIME_FILES 恒同目录）：控制台输出本地代码页安全解码
+
+try:
+    import runtime_lock          # 重启意图标记（RUNTIME_FILES 一员；老安装缺它时退化为无标记）
+except ImportError:              # pragma: no cover - 只服务历史安装目录
+    runtime_lock = None
 
 IS_WIN = sys.platform == "win32"
 IS_MAC = sys.platform == "darwin"
@@ -358,6 +364,62 @@ def cleanup_legacy_bak():
                 f"(failed to remove legacy backup {BAK}; delete it manually: {e})"))
 
 
+def _cold_hashes():
+    """客户端启动时才会读取的冷文件哈希（只有 inject-main.cjs 需要重启换新）。"""
+    try:
+        data = (RUNTIME / "inject-main.cjs").read_bytes()
+    except OSError:
+        return {}
+    return {"inject-main.cjs": hashlib.sha256(data).hexdigest()}
+
+
+def _begin_install_intent(entry: bytes):
+    """重打包前记录「注入已改、待重启」意图；返回 (installation, 发布上下文)。
+
+    installation 是本次注入的身份（asar 路径 + 入口哈希）：publish_install 只在
+    rename 成功后盖章 publishedAt；启动早于盖章的客户端进程不会被误认作已确认。"""
+    if runtime_lock is None:
+        return None, nullcontext()
+    installation = {"asar": str(ASAR.resolve()),
+                    "entryHash": hashlib.sha256(entry).hexdigest()}
+    try:
+        runtime_lock.record_restart(RUNTIME, {
+            "state": "pending-install",
+            "hashes": _cold_hashes(),
+            "installation": installation,
+            "source": "patch_install",
+        })
+    except (OSError, TimeoutError) as e:
+        print(L(f"（重启标记写入失败，不影响安装：{e}）",
+                f"(restart marker write failed; installation is unaffected: {e})"))
+        return None, nullcontext()
+    return installation, runtime_lock.publish_install(RUNTIME, installation)
+
+
+def publish_staged() -> bool:
+    """暂存收尾（watchdog / install_monitor 直接 rename TMP）成功后调用：给既有意图
+    盖 publishedAt。不盖的话客户端重启后哈希虽然对得上，ack 仍会因「未发布」拒绝
+    清除，用户会收到永远消不掉的重启提醒。返回是否确实盖章。"""
+    if runtime_lock is None:
+        return False
+    marker = RUNTIME / runtime_lock.MARKER_NAME
+    if not marker.is_file():
+        return False
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    installation = data.get("installation")
+    if not isinstance(installation, dict):
+        return False
+    try:
+        with runtime_lock.publish_install(RUNTIME, installation):
+            pass          # 空体：进入锁即代表发布已完成，退出时盖章
+    except (OSError, TimeoutError):
+        return False
+    return True
+
+
 # ---------- 安装 / 卸载 ----------
 
 def install(finalize=False, quiet=False):
@@ -400,9 +462,12 @@ def install(finalize=False, quiet=False):
     if not (self_check(TMP) and syntax_check(TMP)):
         print(L("自检失败，未替换。TMP 保留供排查:", "self-check failed; not replaced. TMP kept for inspection:"), TMP)
         return False
+    # 注入已改 → 记待重启意图（真被新进程加载后由 inject-main 回执清除）
+    _installation, publication = _begin_install_intent(new_entry)
     if client_running() and not finalize:
         try:
-            os.replace(TMP, ASAR)
+            with publication:
+                os.replace(TMP, ASAR)
             print(L("\n客户端运行中，但 asar 原子替换成功（运行中进程仍读旧数据）。",
                     "\nZCode is running, but the asar was replaced atomically (running processes keep reading the old data)."))
             print(L("重启 ZCode 后悬浮条生效；已弹出监控窗口，确认生效后自动关闭。",
@@ -422,7 +487,8 @@ def install(finalize=False, quiet=False):
             if not quiet: launch_monitor(time.time())
             return False
     try:
-        os.replace(TMP, ASAR)
+        with publication:
+            os.replace(TMP, ASAR)
     except OSError as e:
         print(L(f"\n替换失败（{e}）。", f"\nReplacement failed ({e})."))
         print(L(f'待替换包保留在 {TMP}；完全退出 ZCode 后重跑 install --finalize，或由看门狗自动收尾。',

@@ -15,6 +15,11 @@ provider_config.json 的 providerRules → account:<family> 回落 builtin），
     缓存 300s（config 可调 quota.ttl_s）：命中即返回；过期且有旧值时立即返回旧值并后台
     刷新（绝不占用泵的 15s 查询预算）；失败不覆盖上次成功数据（以 stale+age_s 呈现）。
 
+失败退避（防把瞬时故障放大成长时间锁死）：
+    网络类       30s 起 ×2 封顶 300s
+    限流 429/503 尊重 Retry-After（秒数或 HTTP-date），钳制 30s–600s
+    解析/鉴权/配置 固定 30 分钟（坏响应、坏 Key、坏端点重试不会自愈）
+
 调试：
     python zquota.py                      # 查询当前服务商（最后一条调用所属）
     python zquota.py --provider <id>      # 指定 provider_id 查询
@@ -31,7 +36,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -46,6 +51,10 @@ FAKEIP_NET = ipaddress.ip_network("198.18.0.0/15")
 HOST_SUFFIXES = ("deepseek.com", "z.ai", "bigmodel.cn", "openrouter.ai")
 DEFAULT_TTL_S = 300
 HTTP_TIMEOUT = 5          # 必须短：常驻泵单次快照预算 15s，额度查询不得拖垮它
+PARSE_BACKOFF_S = 1800    # 解析/鉴权/配置类失败：重试不会自愈（坏响应、坏 Key、坏端点），
+                          # 固定 30 分钟后再试——否则每个快照周期重试只会打爆调度
+RATE_LIMIT_MIN_S = 30     # Retry-After 钳制下限（服务端说 0 也别立刻重试）
+RATE_LIMIT_MAX_S = 600    # Retry-After 钳制上限（别被超长值冻住）
 
 _cache: dict = {"key": None, "at": 0.0, "payload": None}
 _cache_lock = threading.Lock()
@@ -54,6 +63,13 @@ _inflight = False
 # 连续失败退避：网络类失败后 30s 内不重试，之后 ×2 封顶 300s——
 # 否则每个快照周期（1.5s）都重试，密集重试可能触发服务商限流，把瞬时故障放大成长时间锁死
 _fail_state: dict = {"at": 0.0, "backoff": 30.0, "error": ""}
+# 最近一次失败的类型与 Retry-After（由 _fetch 写入、_background_refresh 读取；
+# 单飞刷新下无并发写者）。kind: network / rate_limited / auth / parse / config
+_last_error_meta: dict = {"kind": "network", "retry_after_s": 0.0}
+
+
+class _ParseError(ValueError):
+    """响应不可解析（JSON 坏了 / 形态不对）：换 key、重试都不会自愈，走长退避。"""
 
 
 # --------------------------------------------------------------------------
@@ -191,6 +207,22 @@ def _assert_public_host(hostname: str) -> None:
             raise ValueError(f"拒绝非公网地址 {ip}（host={hostname}）")
 
 
+def _parse_retry_after(value) -> float:
+    """Retry-After 允许秒数或 HTTP-date；解析不出返回 0（调用方按缺省退避处理）。"""
+    if not value:
+        return 0.0
+    text = str(value).strip()
+    try:
+        return max(0.0, float(text))
+    except ValueError:
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+        return max(0.0, parsedate_to_datetime(text).timestamp() - time.time())
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+
+
 def _http_json(url: str, api_key: str) -> dict:
     parsed = urlparse(url)
     if parsed.scheme != "https" or not parsed.hostname:
@@ -202,7 +234,14 @@ def _http_json(url: str, api_key: str) -> dict:
         "User-Agent": "zquota/1.0",
     })
     with urllib.request.build_opener(_NoRedirect).open(req, timeout=HTTP_TIMEOUT) as resp:
-        return json.loads(resp.read().decode("utf-8", "replace"))
+        body = resp.read().decode("utf-8", "replace")
+    try:
+        data = json.loads(body)
+    except ValueError as exc:
+        raise _ParseError(f"响应不是有效 JSON：{exc}") from exc
+    if not isinstance(data, dict):
+        raise _ParseError("响应不是 JSON 对象")
+    return data
 
 
 # --------------------------------------------------------------------------
@@ -331,7 +370,25 @@ def _fetch(provider_id: str | None) -> dict:
         return _invalid("unsupported", name,
                         f"{name} 暂不支持自动查询（已支持 DeepSeek / 智谱·Z.ai / OpenRouter；"
                         f"中转站可配置 balanceUrl）")
-    except Exception as exc:                  # 网络 / 鉴权 / 解析 / 防护拦截
+    except urllib.error.HTTPError as exc:
+        # 429/503 尊重 Retry-After（钳制 30s–600s）；401/403 是凭据问题，重试不会自愈
+        retry = _parse_retry_after(exc.headers.get("Retry-After") if exc.headers else None)
+        if exc.code in (429, 503):
+            kind = "rate_limited"
+        elif exc.code in (401, 403):
+            kind = "auth"
+        else:
+            kind = "network"
+        _last_error_meta.update(kind=kind, retry_after_s=retry)
+        return _invalid("error", None, f"查询失败：HTTP {exc.code} {exc.reason or ''}".strip())
+    except _ParseError as exc:
+        _last_error_meta.update(kind="parse", retry_after_s=0.0)
+        return _invalid("error", None, f"查询失败：{exc}")
+    except ValueError as exc:                  # 防护拦截（非 https / 非公网）与形态校验
+        _last_error_meta.update(kind="config", retry_after_s=0.0)
+        return _invalid("error", None, f"查询失败：{exc}")
+    except Exception as exc:                  # 网络 / 超时 / 其它
+        _last_error_meta.update(kind="network", retry_after_s=0.0)
         return _invalid("error", None, f"查询失败：{exc}")
 
 
@@ -375,14 +432,26 @@ def _background_refresh(key: str | None) -> None:
         payload = _fetch(key)
         if payload.get("ok"):
             _store(key, payload)
+            _last_error_meta.update(kind="network", retry_after_s=0.0)
             with _cache_lock:
                 _fail_state.update(at=0.0, backoff=30.0, error="")
         elif payload.get("reason") == "error":
-            # 网络类失败：留痕（供 UI 显示「上次刷新失败原因」）并按退避推迟下次重试
+            # 失败留痕（供 UI 显示「上次刷新失败原因」）并按类型推迟下次重试：
+            #   解析/鉴权/配置 → 固定 30 分钟（重试不会自愈）
+            #   限流 → 尊重 Retry-After（钳制 30s–600s），没给就按网络类退避
+            #   网络 → 30s 起 ×2 封顶 300s
+            kind = _last_error_meta.get("kind") or "network"
+            retry_after = float(_last_error_meta.get("retry_after_s") or 0.0)
             with _cache_lock:
                 _fail_state["at"] = time.monotonic()
                 _fail_state["error"] = str(payload.get("message") or "")[:160]
-                _fail_state["backoff"] = min(_fail_state["backoff"] * 2, 300.0)
+                if kind in ("parse", "auth", "config"):
+                    _fail_state["backoff"] = float(PARSE_BACKOFF_S)
+                elif kind == "rate_limited" and retry_after > 0:
+                    _fail_state["backoff"] = min(max(retry_after, RATE_LIMIT_MIN_S),
+                                                 RATE_LIMIT_MAX_S)
+                else:
+                    _fail_state["backoff"] = min(_fail_state["backoff"] * 2, 300.0)
         else:
             # 结构性失败（unsupported/no_key 等）：负缓存 60s，避免每个快照周期重复起线程
             with _cache_lock:
@@ -501,6 +570,12 @@ def _selftest() -> int:
     check("fake-IP 段豁免逻辑", ipaddress.ip_address("198.18.0.153") in FAKEIP_NET)
     check("重定向处理器拒绝跳转",
           _NoRedirect().redirect_request(None, None, 302, "", {}, "https://evil.example") is None)
+    check("Retry-After 秒数解析", _parse_retry_after("120") == 120.0)
+    check("Retry-After 非法值归零", _parse_retry_after("soon") == 0.0)
+    check("Retry-After 缺失归零", _parse_retry_after(None) == 0.0)
+    from email.utils import format_datetime
+    future = format_datetime(datetime.now(timezone.utc) + timedelta(seconds=90), usegmt=True)
+    check("Retry-After HTTP-date 解析", 60 <= _parse_retry_after(future) <= 120)
     print("结果：", "全部通过" if not failures else f"{len(failures)} 项失败：{failures}")
     return 1 if failures else 0
 

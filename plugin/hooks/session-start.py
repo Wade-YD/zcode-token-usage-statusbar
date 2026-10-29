@@ -14,17 +14,24 @@
      install.py 解析权威 DATA_DIR/RUNTIME_FILES，再同步全套运行时 + /usage
      命令模板 + 最小 config.json（仅缺失时补 python_path）。MCP 注册与计划任务
      仍属 install.py 主安装。下载硬约束：仅 https + 固定域名白名单（拒绝 IP
-     字面量，环回/私有/保留段全覆盖）、体积上限 20MB、重定向逐跳校验；失败留痕
+     字面量，环回/私有/保留段全覆盖）、体积上限 20MB、重定向逐跳校验、解压面
+     三重上限（成员数 5000 / 单成员 8MB / 累计 64MB，按实际读取长度校验防 gzip
+     炸弹）；失败留痕
      并进入 6 小时冷却（防离线环境下每次会话启动都空等网络超时）。数据目录已有
      运行时则以 ≥24 小时间隔在线刷新（同一受控通道；字节比较内容不变不写；失败
      退避 1 小时，留痕数据目录 watchdog.log）。
   3) 注入自检：调数据目录 watchdog.main(False)——与计划任务同一实现（精确
      匹配、暂存收尾、通知防抖），会话启动即查一次，早于 10 分钟周期。
+  4) 重启提醒：同步/注入改了冷文件（inject-main.cjs）时写重启意图标记
+     （.plugin-restart-required，见 runtime_lock.py），客户端下次启动按「实际
+     加载哈希」回执清除；待确认期间每次会话启动在 systemMessage 里提醒重启
+     （hook 自己刚写的标记给 15 秒宽限，避开客户端回执在途的窗口）。
 
 安全边界：任何异常（含 watchdog 导入失败时的 SystemExit）吞掉后以 0 退出
 （绝不阻断会话启动），失败留痕 hooks/session-start.err.log（带时间戳，
 超 32KB 截断尾部）。
 """
+import hashlib
 import importlib.util
 import io
 import ipaddress
@@ -54,6 +61,18 @@ BOOT_STATE = PLUGIN_ROOT / "hooks" / "bootstrap-state.json"
 BOOT_RETRY_SECS = 6 * 3600         # 引导失败冷却：离线/被墙时别让每次会话启动都等满超时
 BOOT_REFRESH_SECS = 24 * 3600      # 市场形态运行时刷新检查间隔（拉远端做字节比较）
 BOOT_REFRESH_RETRY_SECS = 3600     # 刷新失败退避：1 小时后重试（区别于引导安装的 6h 大冷却）
+
+# 重启闭环（与 runtime_lock.py 同一标记）：冷文件只有客户端重启才会被重新加载，
+# 同步后写意图、客户端启动时按「实际加载哈希」回执清除；钩子只负责在待确认期间提醒。
+COLD_FILES = ("inject-main.cjs",)
+RESTART_MARKER = ".plugin-restart-required"
+RESTART_NOTICE = ("ZCode 状态条已更新，重启 ZCode 后生效：请完全退出 ZCode（所有窗口）"
+                  "后重新打开。仅关闭窗口、刷新页面或重开会话无效。")
+
+# tarball 解包硬上限：压缩包 20MB 上限之外再压一层解压面（gzip 可膨胀千倍）
+MAX_TAR_MEMBERS = 5000
+MAX_MEMBER_BYTES = 8 * 1024 * 1024
+MAX_TOTAL_BYTES = 64 * 1024 * 1024
 
 
 def _paths():
@@ -102,6 +121,50 @@ def sync_runtime(src_root, data_dir, runtime_files):
     return synced
 
 
+def _record_restart(data_dir, changed, source):
+    """同步改了冷文件 → 记「待重启」意图（哈希确认由客户端下次启动回执）。
+
+    只记冷文件：overlay.js / zusage.py / zquota.py 由泵按 mtime 热更新，提醒是噪音。
+    标记写不进只影响提醒，绝不影响同步本身。"""
+    cold = [name for name in COLD_FILES if name in (changed or [])]
+    if not cold:
+        return False
+    try:
+        hashes = {name: hashlib.sha256((data_dir / name).read_bytes()).hexdigest()
+                  for name in cold}
+        sys.path.insert(0, str(data_dir))
+        import runtime_lock
+        runtime_lock.record_restart(data_dir, {
+            "state": "pending-sync", "hashes": hashes,
+            "changed": list(changed), "source": source,
+        })
+        return True
+    except Exception:
+        return False
+
+
+def _restart_notice(data_dir):
+    """待确认的重启意图 → 会话启动提醒（只读；客户端加载新代码后标记即消失）。
+
+    hook 自己刚写的意图给 15 秒宽限：客户端启动回执可能仍在途，本轮不提醒，
+    下次会话启动仍待确认再报（避免每次更新后误报一次）。"""
+    marker = data_dir / RESTART_MARKER
+    if not marker.is_file():
+        return None
+    try:
+        age = time.time() - marker.stat().st_mtime
+        data = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if str(data.get("source") or "").startswith("hook") and age < 15:
+        return None
+    message = RESTART_NOTICE
+    return {"systemMessage": message, "hookSpecificOutput": {
+        "hookEventName": "SessionStart", "additionalContext": message}}
+
+
 def _url_guard(url):
     """下载目标硬校验：仅 https + 域名白名单；主机名是 IP 字面量（环回/私有/保留段
     全覆盖）一律拒绝。URL 本是常量，此函数是纵深防御——防未来改常量时引入注入点。"""
@@ -147,17 +210,37 @@ def _download(url):
 
 def _tar_members(raw, wanted):
     """从 tarball 字节里取 {相对名: 内容}，只收白名单成员（剥掉 GitHub 归档首段目录，
-    拒绝链接/设备等非常规成员）。不用 tarfile.extract()：成员内容只写进我们自己
-    命名的目标路径，无路径穿越面。"""
+    拒绝链接/设备等非常规成员与路径逃逸）。不用 tarfile.extract()：成员内容只写进
+    我们自己命名的目标路径，无路径穿越面。
+
+    解压面硬约束（gzip 可把 20MB 压成数 GB）：成员数、单成员体积、累计体积三重上限，
+    且按实际读取长度校验——不信任 header 里声明的 size。"""
     out = {}
+    total = 0
     with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as tf:
-        for m in tf:
+        for index, m in enumerate(tf):
+            if index >= MAX_TAR_MEMBERS:
+                raise ValueError(f"tarball 成员数超过上限 {MAX_TAR_MEMBERS}")
             parts = PurePosixPath(m.name).parts
+            if m.name.startswith("/") or any(p in ("..", "") for p in parts):
+                raise ValueError(f"tarball 含非法成员路径：{m.name!r}")
             if len(parts) < 2 or not m.isfile():
                 continue
             rel = "/".join(parts[1:])
-            if rel in wanted and rel not in out:
-                out[rel] = tf.extractfile(m).read()
+            if rel not in wanted or rel in out:
+                continue
+            if m.size > MAX_MEMBER_BYTES:
+                raise ValueError(f"成员 {rel} 声明体积超过上限 {MAX_MEMBER_BYTES} 字节")
+            stream = tf.extractfile(m)
+            if stream is None:
+                continue
+            data = stream.read(MAX_MEMBER_BYTES + 1)
+            if len(data) > MAX_MEMBER_BYTES:
+                raise ValueError(f"成员 {rel} 实际体积超过上限 {MAX_MEMBER_BYTES} 字节")
+            total += len(data)
+            if total > MAX_TOTAL_BYTES:
+                raise ValueError(f"tarball 解压总量超过上限 {MAX_TOTAL_BYTES} 字节")
+            out[rel] = data
     missing = set(wanted) - set(out)
     if missing:
         raise RuntimeError("tarball 缺少文件: " + ", ".join(sorted(missing)))
@@ -303,6 +386,7 @@ def _log_sync(data_dir, text):
 
 
 def main():
+    data_dir = Path.home() / ".zcode" / "zcode-token-usage-statusbar"
     try:
         data_dir, runtime_files, repo_available = _paths()
         if repo_available:
@@ -310,14 +394,16 @@ def main():
             if synced:
                 _log_sync(data_dir, "插件钩子同步运行时 %d 个文件：%s"
                           % (len(synced), ", ".join(synced)))
+            _record_restart(data_dir, synced, "hook-repo")
         elif not (data_dir / "watchdog.py").is_file():
             # 市场形态 + 数据目录无运行时 → 引导安装；随后照常走注入自检
             data_dir, synced = bootstrap_runtime(data_dir)
             _log_sync(data_dir, "插件钩子引导安装（GitHub main）写入 %d 个文件：%s"
                       % (len(synced), ", ".join(synced)))
+            _record_restart(data_dir, synced, "hook-bootstrap")
         else:
             # 市场形态 + 已有运行时 → 到期则在线刷新（检查期内零网络）
-            refresh_runtime(data_dir)
+            _record_restart(data_dir, refresh_runtime(data_dir) or [], "hook-refresh")
         sys.path.insert(0, str(data_dir))
         import watchdog
         watchdog.main(False)   # 注入自检：与计划任务同一实现（verbose=False 收输出）
@@ -325,8 +411,22 @@ def main():
         # SystemExit 也必须接住：watchdog 在依赖导入失败时模块级 sys.exit(0)，
         # 若放行则钩子带非零码/traceback 结束且无留痕（违反 spec 的 MUST）。
         _log_err()
+    # 待确认的重启意图 → 本轮会话启动提醒（钩子唯一输出；任何异常都不阻断会话）
+    try:
+        notice = _restart_notice(data_dir)
+    except Exception:
+        notice = None
+    if notice:
+        print(json.dumps(notice, ensure_ascii=False))
     return 0
 
 
 if __name__ == "__main__":
+    # 宿主按 UTF-8 解码钩子 stdout：Windows 无全局 PYTHONUTF8 时中文会按 GBK 写管道
+    # （与 usage_mcp.py 同款防护）。
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
     sys.exit(main())

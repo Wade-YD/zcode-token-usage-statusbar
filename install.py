@@ -32,6 +32,7 @@ Linux：/opt/ZCode、/usr/lib/zcode 等 deb/rpm 布局）；
 （asar_path 字段），之后的安装/卸载一律免传 --asar。
 """
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -95,7 +96,11 @@ COMMANDS_DIR = real_home() / ".zcode" / "commands"
 MCP_NAME = "zcode-token-usage-statusbar"   # MCP server 注册名（与仓库名一致；老安装叫 token-usage/zusage，自动迁移）
 MCP_NAME_OLD = ("token-usage", "zusage")   # 历史注册名
 RUNTIME_FILES = ("inject-main.cjs", "overlay.js", "zusage.py", "zquota.py", "usage_mcp.py",
-                 "watchdog.py", "install.py", "patch_install.py", "install_monitor.py")
+                 "watchdog.py", "install.py", "patch_install.py", "install_monitor.py",
+                 "runtime_lock.py")
+# 冷文件：客户端只在启动时读一次（asar 注入行 import 的就是它），换新后必须重启
+# 才生效——其余运行时文件都走 mtime 热更新（overlay.js / zusage.py / zquota.py）
+COLD_FILES = ("inject-main.cjs",)
 WATCHDOG_TASK = "zusage-watchdog"
 
 # ZCode 安装位置候选：resources/app.asar 存在即命中（按序探测，按当前平台取组）
@@ -301,20 +306,62 @@ def chown_to_user(path):
         pass
 
 
+def sha256_of(path):
+    """文件摘要（读不到返回空串：调用方按「无法确认」处理，不误判为已加载）。"""
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
+def record_restart_intent(changed, source):
+    """运行时同步改了冷文件 → 记「待重启」意图（哈希确认由 inject-main 启动时回执）。
+
+    只记冷文件（COLD_FILES）：overlay.js / zusage.py / zquota.py 由泵按 mtime 热更新，
+    提醒重启反而是噪音。意图写不进只影响提醒，不影响同步本身。"""
+    cold = [name for name in COLD_FILES if name in changed]
+    if not cold:
+        return False
+    try:
+        sys.path.insert(0, str(DATA_DIR))
+        import runtime_lock
+        runtime_lock.record_restart(DATA_DIR, {
+            "state": "pending-sync",
+            "hashes": {name: sha256_of(DATA_DIR / name) for name in cold},
+            "changed": list(changed),
+            "source": source,
+        })
+        return True
+    except Exception:
+        return False
+
+
 def copy_runtime(dry):
-    """复制运行时四件套到数据目录（无条件覆盖：overlay 的 mtime 变化会让泵 2 秒内热重载）。"""
+    """复制运行时到数据目录（无条件覆盖：overlay 的 mtime 变化会让泵 2 秒内热重载）。
+    返回内容有变化的文件名列表（字节比较；冷文件变化会记重启意图）。"""
     for name in RUNTIME_FILES:
         src = HERE / name
         assert src.is_file(), L(f"缺少运行时文件：{src}", f"Missing runtime file: {src}")
     print(L(f"[运行时] 复制 {len(RUNTIME_FILES)} 个文件 → {DATA_DIR}",
             f"[runtime] copying {len(RUNTIME_FILES)} files -> {DATA_DIR}"))
-    if not dry:
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        chown_to_user(DATA_DIR)
-        for name in RUNTIME_FILES:
-            shutil.copy2(HERE / name, DATA_DIR / name)
-            chown_to_user(DATA_DIR / name)
-    return True
+    if dry:
+        return []
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    chown_to_user(DATA_DIR)
+    changed = []
+    for name in RUNTIME_FILES:
+        src, dst = HERE / name, DATA_DIR / name
+        try:
+            same = dst.is_file() and dst.read_bytes() == src.read_bytes()
+        except OSError:
+            same = False
+        shutil.copy2(src, dst)
+        chown_to_user(dst)
+        if not same:
+            changed.append(name)
+    if changed:
+        record_restart_intent(changed, "install")
+    return changed
 
 
 def prepare_config(dry, dev):
