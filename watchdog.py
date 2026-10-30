@@ -132,6 +132,22 @@ def main(verbose: bool) -> int:
     except Exception:
         pass   # --dev 安装没有数据目录副本，set_runtime 缺省即可
 
+    # 待收尾包优先：先校验并尝试发布（ZCode 未运行时通常一次成功），避免每轮重打包。
+    # 校验不过 = ZCode 又升级过，旧包不能覆盖新版：丢弃身份，让下面的常规流程按当前版本重打。
+    if pi.TMP.is_file():
+        result = pi.finalize_pending()
+        if result == "published":
+            log("暂存收尾完成（来源/内容校验通过）")
+            state_save({})
+        elif result == "untrusted":
+            log("暂存包校验失败（asar 已再次更新或 TMP 被改动），丢弃旧包身份，按当前版本重打")
+            pi.clear_pending_meta()
+            state_save({})
+        elif result == "busy":
+            log("暂存包待收尾（asar 仍被占用），拉起静默监控等待退出")
+            pi.ensure_monitor(quiet=True)
+            return 0
+
     entry = pi.entry_bytes_of(asar)
     exact = pi.INJECT_LINE.encode() in entry   # 精确匹配当前目录注入行（宽松 RE 会放过指向死路径的旧行）
     st = state_load()
@@ -148,17 +164,19 @@ def main(verbose: bool) -> int:
 
     stamp = f"staged@{int(asar.stat().st_mtime)}"
     if st.get("staged_key") == stamp:
-        # 暂存收尾（P0-3）：直接尝试原子替换，失败=asar 仍被锁，留待下周期。
-        # 不按"tasklist 无 ZCode 进程"判定收尾：Electron 退出后常残留 crashpad/tray
-        # 存根进程（不锁 asar），按进程表等会永远等不下去（实测 21 个残留进程卡收尾）。
+        # 上面已优先处理过 TMP；走到这里通常说明 TMP 已被其它进程收尾或清理。
         if pi.TMP.is_file():
-            try:
-                os.replace(pi.TMP, pi.ASAR)
-                pi.publish_staged()   # 给重启意图盖「已发布」章（否则 ack 永远拒绝清除）
-                log("asar 已解锁，暂存修复收尾完成")
+            result = pi.finalize_pending()
+            if result == "published":
+                log("暂存收尾完成（来源/内容校验通过）")
                 state_save({})
-            except OSError as e:
-                log(f"收尾暂不可行（asar 仍被占用）：{e}")
+            elif result == "untrusted":
+                log("暂存包校验失败，丢弃旧包身份，下轮按当前版本重打")
+                pi.clear_pending_meta()
+                state_save({})
+            else:
+                log("收尾暂不可行（asar 仍被占用），拉起静默监控等待退出")
+                pi.ensure_monitor(quiet=True)
         else:
             log(".tmp 消失（被外部清理？），复位状态")
             state_save({})
@@ -169,7 +187,8 @@ def main(verbose: bool) -> int:
     log(f"重打结果 ok={ok}（ZCode {'运行中' if running else '未运行'}）")
     if not ok:
         # 暂存场景也要让用户知道：否则修复躺在 tmp 里没人重启就永远不生效
-        log(".tmp 已暂存，等待 ZCode 退出后下个周期收尾")
+        log(".tmp 已暂存，拉起静默监控等待 ZCode 退出（不再等 10 分钟周期）")
+        pi.ensure_monitor(quiet=True)
         st = state_load()
         st["staged_key"] = stamp
         if running and st.get("notified_key") != stamp:

@@ -69,6 +69,10 @@ else:
 ASAR = ASAR_DEFAULT          # 可被 set_target() 改指其它安装位置（install.py 探测后调用）
 BAK = ASAR.with_name("app.asar.zusage.bak")
 TMP = ASAR.with_name("app.asar.zusage.tmp")
+# 待收尾包的来源身份（JSON）：记录 repack 时的源 asar 指纹与 TMP 指纹。收尾前校验，
+# 防止 ZCode 再次升级后拿旧包覆盖新版客户端（那种回滚比"没状态条"更糟）。
+TMP_META = ASAR.with_name("app.asar.zusage.tmp.json")
+MONITOR_LOCK_NAME = "app.asar.zusage.monitor.lock"   # 监控实例锁（同目录，随 ASAR 走）
 RUNTIME_EXPLICIT = False     # set_runtime() 显式指定过运行时（install.py/watchdog 拉起时为 True；
                              # standalone __main__ 仅在用户传了 --runtime/ZCODE_RUNTIME 时为 True）
 _STANDALONE = False          # __main__ 直接运行时置 True（被导入时恒 False，守卫不生效）
@@ -153,12 +157,13 @@ def zcode_exe_for(asar_path):
 
 
 def set_target(asar_path):
-    """改指目标安装位置（BAK/TMP/ZCODE_EXE 随动）。ZCODE_EXE 只用于语法自检，缺了自动跳过。"""
-    global ASAR, BAK, TMP, ZCODE_EXE
+    """改指目标安装位置（BAK/TMP/TMP_META/ZCODE_EXE 随动）。ZCODE_EXE 只用于语法自检，缺了自动跳过。"""
+    global ASAR, BAK, TMP, TMP_META, ZCODE_EXE
     asar_path = Path(asar_path)
     ASAR = asar_path
     BAK = asar_path.with_name("app.asar.zusage.bak")
     TMP = asar_path.with_name("app.asar.zusage.tmp")
+    TMP_META = asar_path.with_name("app.asar.zusage.tmp.json")
     ZCODE_EXE = zcode_exe_for(asar_path)
 
 
@@ -177,23 +182,12 @@ def client_running():
 
 
 def launch_monitor(epoch):
-    """Windows 开新控制台窗口跑安装监控（提醒重启 + 确认生效 + .tmp 收尾）；
+    """开新控制台窗口跑安装监控（提醒重启 + 确认生效 + .tmp 收尾）；
     macOS/Linux 无控制台概念，后台静默跑（收尾与自动退出照常）。设 ZUSAGE_NO_MONITOR=1 可禁用。"""
     if os.environ.get("ZUSAGE_NO_MONITOR"):
-        return
-    monitor = HERE / "install_monitor.py"
-    if not monitor.exists():
-        return
-    cmd = [sys.executable, str(monitor), "%.3f" % epoch, str(ASAR), str(RUNTIME)]
-    try:
-        if IS_WIN:
-            return subprocess.Popen(cmd, creationflags=subprocess.CREATE_NEW_CONSOLE, cwd=str(HERE))
-        return subprocess.Popen(cmd, cwd=str(HERE),
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except OSError as e:
-        print(L(f"（监控窗口启动失败，不影响安装：{e}）",
-                f"(monitor window failed to launch; installation is unaffected: {e})"))
         return None
+    _spawn_monitor(quiet=False, epoch=epoch)
+    return True
 
 
 # ---------- asar 读写 ----------
@@ -396,28 +390,178 @@ def _begin_install_intent(entry: bytes):
     return installation, runtime_lock.publish_install(RUNTIME, installation)
 
 
-def publish_staged() -> bool:
-    """暂存收尾（watchdog / install_monitor 直接 rename TMP）成功后调用：给既有意图
-    盖 publishedAt。不盖的话客户端重启后哈希虽然对得上，ack 仍会因「未发布」拒绝
-    清除，用户会收到永远消不掉的重启提醒。返回是否确实盖章。"""
-    if runtime_lock is None:
+def _fingerprint(path, deep=False):
+    """文件身份指纹：size + mtime_ns（便宜）+ 可选 sha256（374MB 约 2 秒）。"""
+    st = Path(path).stat()
+    fp = {"size": st.st_size, "mtime_ns": st.st_mtime_ns}
+    if deep:
+        digest = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                digest.update(chunk)
+        fp["sha256"] = digest.hexdigest()
+    return fp
+
+
+def _same_fingerprint(before, now, deep=False):
+    if not isinstance(before, dict) or not isinstance(now, dict):
         return False
-    marker = RUNTIME / runtime_lock.MARKER_NAME
-    if not marker.is_file():
+    if before.get("size") != now.get("size") or before.get("mtime_ns") != now.get("mtime_ns"):
         return False
-    try:
-        data = json.loads(marker.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return False
-    installation = data.get("installation")
-    if not isinstance(installation, dict):
-        return False
-    try:
-        with runtime_lock.publish_install(RUNTIME, installation):
-            pass          # 空体：进入锁即代表发布已完成，退出时盖章
-    except (OSError, TimeoutError):
-        return False
+    if deep:
+        return bool(before.get("sha256")) and before.get("sha256") == now.get("sha256")
     return True
+
+
+def _write_pending_meta(source_fp, tmp_fp):
+    """原子写待收尾包的来源身份（同目录 mkstemp + replace）。"""
+    data = {
+        "version": 1, "operation": "install", "validated": True,
+        "asar": str(ASAR.resolve()), "runtime": str(RUNTIME.resolve()),
+        "source": source_fp, "tmp": tmp_fp,
+        "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    fd, name = tempfile.mkstemp(prefix=".zusage-meta.", dir=str(ASAR.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(name, TMP_META)
+    finally:
+        try:
+            os.unlink(name)
+        except FileNotFoundError:
+            pass
+
+
+def _read_pending_meta():
+    try:
+        data = json.loads(TMP_META.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("version") != 1:
+        return None
+    if data.get("operation") != "install" or data.get("validated") is not True:
+        return None
+    if data.get("asar") != str(ASAR.resolve()) or data.get("runtime") != str(RUNTIME.resolve()):
+        return None
+    return data
+
+
+def verify_pending(deep=False):
+    """校验暂存包仍由「当前 asar」生成且 TMP 未被改动。返回 (ok, reason)。
+
+    deep=True 额外比 sha256：只在监控启动/首次收尾前做一次（374MB 哈希约 2 秒），
+    之后的重试用 stat（size+mtime_ns）快速判定。"""
+    if not TMP.is_file():
+        return False, "no-tmp"
+    meta = _read_pending_meta()
+    if meta is None:
+        return False, "no-meta"
+    try:
+        source_now = _fingerprint(ASAR, deep=deep)
+        tmp_now = _fingerprint(TMP, deep=deep)
+    except OSError as e:
+        return False, f"stat-failed: {e}"
+    if not _same_fingerprint(meta.get("source"), source_now, deep):
+        return False, "source-changed"    # ZCode 又升级过：旧包不能覆盖新版
+    if not _same_fingerprint(meta.get("tmp"), tmp_now, deep):
+        return False, "tmp-changed"       # TMP 被外部改动/半写
+    return True, "ok"
+
+
+def clear_pending_meta():
+    try:
+        TMP_META.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
+
+def finalize_pending(deep=False):
+    """校验并发布待收尾包（替换 + 重启意图盖章）。返回：
+
+    published  已替换并盖章
+    missing    没有待收尾包
+    untrusted  来源/内容校验失败，拒绝替换（文件保留供排查）
+    busy       asar 仍被占用
+    """
+    ok, reason = verify_pending(deep=deep)
+    if not ok:
+        return "missing" if reason == "no-tmp" else "untrusted"
+    installation = None
+    marker = RUNTIME / runtime_lock.MARKER_NAME if runtime_lock else None
+    if marker is not None and marker.is_file():
+        try:
+            installation = json.loads(marker.read_text(encoding="utf-8")).get("installation")
+        except (OSError, ValueError):
+            installation = None
+    try:
+        if runtime_lock is not None and isinstance(installation, dict):
+            with runtime_lock.publish_install(RUNTIME, installation):
+                os.replace(TMP, ASAR)
+        else:
+            os.replace(TMP, ASAR)
+    except (OSError, TimeoutError):
+        return "busy"
+    clear_pending_meta()
+    return "published"
+
+
+def monitor_lock_path():
+    return ASAR.with_name(MONITOR_LOCK_NAME)
+
+
+def ensure_monitor(quiet=True):
+    """TMP 待收尾时拉起监控（幂等：已有实例持锁则跳过）。返回是否新拉起。
+
+    钩子/看门狗无人值守路径用 quiet=True：CREATE_NO_WINDOW + 脱离父 Job，
+    这样 ZCode 退出时监控还活着，能在退出窗口内完成替换。"""
+    if not TMP.is_file() or runtime_lock is None:
+        return False
+    probe = runtime_lock.FileLock(monitor_lock_path(), timeout=0)
+    if not probe.acquire():
+        return False          # 已有监控实例
+    probe.release()           # 交给子进程持锁；子进程抢不到会自行退出
+    return _spawn_monitor(quiet=quiet)
+
+
+def _spawn_monitor(quiet=True, epoch=None):
+    """拉起安装监控（参数列表 + shell=False，不经 shell）。"""
+    monitor = HERE / "install_monitor.py"
+    if not monitor.is_file():
+        return False
+    cmd = [str(sys.executable), str(monitor), "%.3f" % (epoch or time.time()),
+           str(ASAR), str(RUNTIME)]
+    env = dict(os.environ)
+    if quiet:
+        env["ZUSAGE_MONITOR_QUIET"] = "1"
+    devnull = subprocess.DEVNULL
+    if not IS_WIN:
+        try:
+            subprocess.Popen(cmd, shell=False, cwd=str(HERE), env=env,
+                             stdin=devnull, stdout=devnull, stderr=devnull)
+            return True
+        except OSError as e:
+            print(L(f"（监控进程拉起失败，不影响安装：{e}）",
+                    f"(monitor failed to launch; installation is unaffected: {e})"))
+            return False
+    base = subprocess.CREATE_NO_WINDOW if quiet else subprocess.CREATE_NEW_CONSOLE
+    breakaway = getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0)
+    for extra in (breakaway, 0):   # Job 不允许 breakaway 时退回普通方式
+        try:
+            subprocess.Popen(cmd, shell=False, cwd=str(HERE), env=env,
+                             creationflags=base | extra, stdin=devnull,
+                             stdout=devnull if quiet else None,
+                             stderr=devnull if quiet else None)
+            return True
+        except OSError:
+            continue
+    print(L("（监控进程拉起失败，不影响安装）",
+            "(monitor failed to launch; installation is unaffected)"))
+    return False
 
 
 # ---------- 安装 / 卸载 ----------
@@ -457,17 +601,21 @@ def install(finalize=False, quiet=False):
         print(L("检测到旧注入行（可能指向旧目录），将替换为新路径。",
                 "Old injection line detected (possibly pointing at an old directory); it will be replaced with the new path."))
     print(L("重打包（307MB，约需十几秒）...", "repacking (307MB, takes ~10-20 seconds)..."))
+    source_fp = _fingerprint(ASAR, deep=True)   # repack 只读 ASAR：先记下源身份
     repack(ASAR, {"/" + ENTRY: new_entry})
     print(L("结构自检：", "self-check:"))
     if not (self_check(TMP) and syntax_check(TMP)):
         print(L("自检失败，未替换。TMP 保留供排查:", "self-check failed; not replaced. TMP kept for inspection:"), TMP)
         return False
+    # 记录待收尾包身份：收尾前若源 asar 已被再次更新，拒绝用旧包覆盖新版
+    _write_pending_meta(source_fp, _fingerprint(TMP, deep=True))
     # 注入已改 → 记待重启意图（真被新进程加载后由 inject-main 回执清除）
     _installation, publication = _begin_install_intent(new_entry)
     if client_running() and not finalize:
         try:
             with publication:
                 os.replace(TMP, ASAR)
+            clear_pending_meta()
             print(L("\n客户端运行中，但 asar 原子替换成功（运行中进程仍读旧数据）。",
                     "\nZCode is running, but the asar was replaced atomically (running processes keep reading the old data)."))
             print(L("重启 ZCode 后悬浮条生效；已弹出监控窗口，确认生效后自动关闭。",
@@ -477,8 +625,9 @@ def install(finalize=False, quiet=False):
             return True
         except OSError as e:
             if quiet:
-                print(L(f"\n运行中替换失败（{e}）。.tmp 已暂存：完全退出 ZCode 后由看门狗自动完成替换。",
-                        f"\nReplacement while running failed ({e}). The .tmp is staged; the watchdog finishes the swap once ZCode quits completely."))
+                print(L(f"\n运行中替换失败（{e}）。.tmp 已暂存：已拉起静默监控，完全退出 ZCode 后自动完成替换。",
+                        f"\nReplacement while running failed ({e}). The .tmp is staged; a silent monitor will finish the swap once ZCode quits completely."))
+                ensure_monitor(quiet=True)
             else:
                 print(L(f"\n运行中替换失败（{e}）。已弹出监控窗口：完全退出 ZCode 后会自动完成替换，",
                         f"\nReplacement while running failed ({e}). A monitor window has opened: it finishes the replacement once ZCode quits completely,"))
@@ -493,7 +642,10 @@ def install(finalize=False, quiet=False):
         print(L(f"\n替换失败（{e}）。", f"\nReplacement failed ({e})."))
         print(L(f'待替换包保留在 {TMP}；完全退出 ZCode 后重跑 install --finalize，或由看门狗自动收尾。',
                 f'Pending package kept at {TMP}; quit ZCode completely and re-run install --finalize, or let the watchdog finish it.'))
+        if quiet:
+            ensure_monitor(quiet=True)
         return False
+    clear_pending_meta()
     print(L("完成。启动 ZCode 即可在窗口底部看到悬浮条。", "Done. Start ZCode and the floating bar appears at the bottom of the window."))
     cleanup_legacy_bak()
     if not quiet: launch_monitor(time.time())
@@ -512,6 +664,7 @@ def remove():
         return True
     print(L("重打包（剥离注入行，约需十几秒）...", "repacking (stripping the injection line, takes ~10-20 seconds)..."))
     repack(ASAR, {"/" + ENTRY: stripped})
+    clear_pending_meta()   # TMP 现在是 remove 包：任何旧 install 身份立即作废
     print(L("结构自检：", "self-check:"))
     if not (self_check(TMP, expect=False) and syntax_check(TMP)):
         print(L("自检失败，未替换。TMP 保留供排查:", "self-check failed; not replaced. TMP kept for inspection:"), TMP)
@@ -539,8 +692,10 @@ def check():
     if injected:
         syntax_check(ASAR)
     if TMP.exists():
+        ok, reason = verify_pending()
         print(L("存在待替换 TMP:", "Pending replacement TMP exists:"), TMP,
-              L(f'（退出 ZCode 后跑 install --finalize --asar "{ASAR}" --runtime "{RUNTIME}"）',
+              L(f'（校验：{"通过" if ok else reason}）', f'(verify: {"ok" if ok else reason})'))
+        print(L(f'（退出 ZCode 后跑 install --finalize --asar "{ASAR}" --runtime "{RUNTIME}"）',
                 f'(quit ZCode, then run install --finalize --asar "{ASAR}" --runtime "{RUNTIME}")'))
 
 

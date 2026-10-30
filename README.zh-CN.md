@@ -102,8 +102,8 @@ ZCode 的插件机制（`plugin.json`）只能提供 MCP / skills / commands / h
 | `install.py` | **一键安装**：探测 ZCode 安装位置 → 复制运行时到数据目录 → 生成 config → 注入 asar → 注册 MCP → 装 /usage 命令 → 弹监控窗口。`--remove` 卸载，`--dry-run` 预览，`--no-mcp` 只装状态条，`--dev` 开发模式（不复制，注入直指本仓库目录）。 |
 | `overlay.js` | 状态条本体（渲染进程注入，自包含 IIFE）。fixed 悬浮在**窗口最底部**（条下只留 3px 缝，给输入卡片加 margin-bottom 上移让位），rAF 每帧跟随；输入框定位要求 textarea 在视口下半部（排除设置页等处的输入元素）。 |
 | `inject-main.cjs` | 主进程 loader：向每个窗口注入 overlay.js + **触发式监听 db 写入**（fs.watch db 目录，有写入→去抖 300ms→查询推送；空闲零进程零轮询，仅 30s 兜底心跳）。查询走**常驻 python**（`zusage.py serve` 行协议；意外退出自动重启、30s 内 3 次判不稳定回退一次性 spawn、zusage.py mtime 变化自动重启；stdin EOF 随泵退出自清理）。 |
-| `patch_install.py` | asar 注入/卸载工具（install.py 的底层，可单独用）：在入口 `out/main/index.js` 尾部追加/剥离本工具的 dynamic import 行 → 重打包 → 自检 → 原子替换。不制作也不依赖备份，卸载只动自己的注入行（其它工具后装的注入行不受影响）。幂等，自动替换旧注入行（迁移友好）。安装成功自动弹出监控窗口。 |
-| `install_monitor.py` | 安装监控窗口（常驻命令行，每 10 秒检测一次）：持续提醒重启 ZCode；重启后通过 diag 更新确认注入加载，显示成功并自动退出。运行中原子替换失败（生成 .tmp）时，它还会在 ZCode 退出后自动完成替换——**收尾不依赖计划任务**。 |
+| `patch_install.py` | asar 注入/卸载工具（install.py 的底层，可单独用）：在入口 `out/main/index.js` 尾部追加/剥离本工具的 dynamic import 行 → 重打包 → 自检 → 原子替换。待收尾包（`.tmp`）带来源身份 sidecar（源 asar 与 TMP 的 size/mtime/sha256），收尾前校验：ZCode 再次升级后拒绝用旧包覆盖新版。不制作也不依赖备份，卸载只动自己的注入行（其它工具后装的注入行不受影响）。幂等，自动替换旧注入行（迁移友好）。 |
+| `install_monitor.py` | 安装监控 / 收尾进程：**等 ZCode 进程退出的事件**（`WaitForMultipleObjects`，不是固定轮询——实测退出窗口只有几秒）后完成 asar 替换；替换前校验待收尾包的来源指纹，ZCode 又升级过就拒绝用旧包覆盖新版。可见模式提醒重启；静默模式（`ZUSAGE_MONITOR_QUIET=1`，钩子/看门狗自动拉起）无窗口，只写 `watchdog.log`。单实例锁去重，最长存活 24 小时。 |
 | `runtime_lock.py` | 重启闭环原语（零依赖）：跨进程文件锁 + `.plugin-restart-required` 重启意图标记 + 加载哈希确认。同步/注入改了冷文件后写意图，客户端启动时由 loader 上报「实际加载的哈希」自动清除——「已修复待重启」和「修复失败/替换未落地」因此可区分，钩子只在待确认期间提醒。 |
 | `zusage.py` | 查询库 + CLI + 机器可读快照（`json` 子命令，状态条数据源）。 |
 | `zquota.py` | 额度/余额查询模块（额度条目的数据源）：三级 provider 解析、DeepSeek/智谱/OpenRouter 三家查询、自定义 `balanceUrl`/`balanceKind`、5 分钟缓存与失败保留。**唯一的出网点**，走防护闸（仅 https + 公网解析校验 + 拒绝重定向）。 |
@@ -157,6 +157,7 @@ python patch_install.py install
 | `zusage.py` | 重跑 install.py 同步副本后，泵检测到副本 mtime 变化即自动重启常驻 python（~2 秒生效）；一次性回退模式下仍是每次轮询新进程、下次轮询生效 |
 | `config.json`（数据目录） | 下次拉取时生效（拉取由 db 写入触发；完全空闲时最迟一个兜底心跳，默认 30s） |
 | `inject-main.cjs` 本身 / 首次安装 / 标准↔dev 互切 | 重跑 `python install.py` 后**需重启 ZCode**（注入行含绝对路径，脚本自动替换旧行） |
+| ZCode 官方升级（asar 被覆盖） | 下次会话启动时钩子发现注入行缺失 → 自动重打并暂存，同时拉起静默监控；你完全退出 ZCode 后由监控在退出窗口内完成替换。重开即恢复，无需手动操作。 |
 | 重启提醒 | 冷文件（`inject-main.cjs`）更新后，数据目录出现 `.plugin-restart-required`；ZCode 启动加载新代码后自动清除。待确认期间每次会话启动会提醒重启（15 秒内的新标记不提醒，避开客户端回执在途）。 |
 
 ## 与其它注入类工具共存（重要）

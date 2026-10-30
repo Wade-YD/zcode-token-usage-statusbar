@@ -85,6 +85,7 @@ Click ⚙ to toggle any bar item, override the context window size, or switch th
 - **CLI**: `python zusage.py [now|today|json|quota|speed [N]|days N|sessions [N]|models [days]|workspace <dir keyword>|session <id prefix>|watch]`.
 - **/usage command** in the chat input.
 - **Watchdog self-heal (Windows)**: install registers a scheduled task `zusage-watchdog` (every 10 min) — when a ZCode update wipes the injection, it re-patches automatically and shows a system notification prompting a restart. `--no-watchdog` skips it, `--remove` deletes it.
+- **Update self-heal**: when a ZCode update overwrites app.asar, the session-start hook re-patches and stages the package, then launches a windowless monitor that swaps it in the instant ZCode fully exits (process-handle wait instead of polling — the exit window is only a few seconds). The staged package carries source/TMP fingerprints, so a stale package can never overwrite a newer official build.
 - **Restart acknowledgement**: updates that touch the cold loader (`inject-main.cjs`) write a restart intent marker (`runtime_lock.py`: cross-process file lock + sha256 confirmation). The marker is cleared only when the client actually loads the new file, so "updated but not restarted" is distinguishable from "update failed or staged only"; while pending, each session start reminds you to restart.
 - **doctor self-check**: `python zusage.py doctor [--net]` checks Python / db column integrity / runtime files / asar injection / diag / pump process in one command — run this first when troubleshooting.
 

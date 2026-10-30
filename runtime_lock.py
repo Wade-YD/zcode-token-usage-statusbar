@@ -44,46 +44,85 @@ MARKER_NAME = ".plugin-restart-required"
 LOCK_NAME = "plugin-restart.lock"
 
 
-@contextmanager
-def file_lock(path, timeout=10.0):
-    """获取咨询锁，超时抛 TimeoutError；锁文件永不 unlink。"""
-    fd = os.open(os.fspath(path), os.O_RDWR | os.O_CREAT, 0o600)
-    locked = False
-    deadline = time.monotonic() + max(0.0, timeout)
-    try:
-        if os.name == "nt":
-            import msvcrt
-            if os.fstat(fd).st_size == 0:
-                os.write(fd, b"\0")   # msvcrt.locking 需要至少 1 字节可锁区间
-        else:
-            import fcntl
-        while True:
-            try:
-                if os.name == "nt":
-                    os.lseek(fd, 0, os.SEEK_SET)
-                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-                else:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                locked = True
-                break
-            except OSError as exc:
-                if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
-                    raise
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise TimeoutError("runtime lock is busy: " + os.fspath(path)) from exc
-                time.sleep(min(0.05, remaining))
-        yield
-    finally:
+class FileLock:
+    """进程级排他锁（Windows msvcrt / POSIX flock），锁文件永不 unlink。
+
+    需要「整个进程生命周期持锁」的场景（监控实例去重）用 acquire()/release()；
+    临时临界区用下面的 file_lock() 上下文管理器。"""
+
+    def __init__(self, path, timeout=10.0):
+        self.path = os.fspath(path)
+        self.timeout = max(0.0, float(timeout))
+        self._fd = None
+        self._locked = False
+
+    def acquire(self):
+        """非阻塞重试直到超时，返回是否拿到锁；其它 OSError 原样抛出。"""
+        fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+        deadline = time.monotonic() + self.timeout
         try:
-            if locked:
-                if os.name == "nt":
-                    os.lseek(fd, 0, os.SEEK_SET)
-                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-                else:
-                    fcntl.flock(fd, fcntl.LOCK_UN)
+            if os.name == "nt":
+                import msvcrt
+                if os.fstat(fd).st_size == 0:
+                    os.write(fd, b"\0")   # msvcrt.locking 需要至少 1 字节可锁区间
+            else:
+                import fcntl
+            while True:
+                try:
+                    if os.name == "nt":
+                        os.lseek(fd, 0, os.SEEK_SET)
+                        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                    else:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    self._fd = fd
+                    self._locked = True
+                    return True
+                except OSError as exc:
+                    if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                        raise
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return False
+                    time.sleep(min(0.05, remaining))
+        finally:
+            if not self._locked:
+                os.close(fd)
+
+    def release(self):
+        if not self._locked:
+            return
+        fd, self._fd, self._locked = self._fd, None, False
+        try:
+            if os.name == "nt":
+                import msvcrt
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)
+
+    def __enter__(self):
+        if not self.acquire():
+            raise TimeoutError("runtime lock is busy: " + self.path)
+        return self
+
+    def __exit__(self, *exc):
+        self.release()
+        return False
+
+
+@contextmanager
+def file_lock(path, timeout=10.0):
+    """临界区写法：拿不到锁抛 TimeoutError；锁文件永不 unlink。"""
+    lock = FileLock(path, timeout)
+    if not lock.acquire():
+        raise TimeoutError("runtime lock is busy: " + lock.path)
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 def _read_marker(marker):

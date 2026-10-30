@@ -138,6 +138,18 @@ class FileLockTests(unittest.TestCase):
             with runtime_lock.file_lock(lock_path, timeout=1):   # 可再次获取
                 pass
 
+    def test_second_holder_in_process_fails(self):
+        # 监控实例锁依赖这个语义：同一把锁的第二个持有者必须拿不到
+        with tempfile.TemporaryDirectory() as tmp:
+            lock_path = Path(tmp) / "monitor.lock"
+            first = runtime_lock.FileLock(lock_path, timeout=0)
+            self.assertTrue(first.acquire())
+            second = runtime_lock.FileLock(lock_path, timeout=0)
+            self.assertFalse(second.acquire())
+            first.release()
+            self.assertTrue(second.acquire())
+            second.release()
+
 
 if __name__ == "__main__":
     unittest.main()
