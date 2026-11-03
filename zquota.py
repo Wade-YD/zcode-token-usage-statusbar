@@ -143,13 +143,14 @@ def _provider_entry(provider_id: str | None) -> dict:
 
     rules = (((_load_json(PROVIDER_RULES).get("config") or {})
               .get("providerConfigRules") or {}).get("providerRules") or [])
+    empty_rule = None
     for rule in rules:
         if rule.get("providerId") != provider_id:
             continue
         rc = rule.get("config") or {}
         access = rc.get("access") or {}
         api = rc.get("api") or {}
-        return {
+        entry = {
             "name": rule.get("providerName") or provider_id,
             "enabled": rule.get("enabled"),
             "options": {
@@ -160,7 +161,15 @@ def _provider_entry(provider_id: str | None) -> dict:
                 "balanceKind": (rc.get("balanceKind") or api.get("balanceKind") or "").strip(),
             },
         }
-
+        # ZCode 3.16+ 会把套餐订阅写成 account:* 规则但 apiKey 留空（真 key 在
+        # v2/config.json 的 builtin 条目里）——此类规则不得遮蔽 account: 回落。
+        if not entry["options"]["apiKey"]:
+            if provider_id.startswith("account:"):
+                if empty_rule is None:
+                    empty_rule = entry
+                continue
+            return entry
+        return entry
     if provider_id.startswith("account:"):
         family = provider_id.split(":", 1)[1].split("-", 1)[0]
         if family:
@@ -168,6 +177,8 @@ def _provider_entry(provider_id: str | None) -> dict:
                 options = item.get("options") or {}
                 if family in pid and item.get("enabled") and options.get("apiKey"):
                     return item
+    if empty_rule is not None:
+        return empty_rule
     return {}
 
 
@@ -525,11 +536,14 @@ def cached_payload(provider_id: str | None = None, cfg: dict | None = None) -> d
                 payload["last_error"] = _fail_state["error"] or None
                 _maybe_schedule_refresh(pid)
             return payload
-        started = _maybe_schedule_refresh(pid)
-    with _cache_lock:
-        busy = _inflight
         neg_fresh = (_neg["payload"] is not None and _neg["key"] == pid
                      and time.monotonic() - _neg["at"] < _NEG_TTL)
+        if neg_fresh:
+            # 结构性失败窗口内直接呈现真实原因（no_key/unsupported），不再起线程——
+            # 否则调度分支永远先返回 warming，负缓存形同虚设（10-31 额度 eternal-warming 根因之二）。
+            return dict(_neg["payload"])
+        started = _maybe_schedule_refresh(pid)
+        busy = _inflight
     if started:
         return {"ok": False, "reason": "warming", "provider_name": None, "message": "额度数据预热中…",
                 "age_s": None}
