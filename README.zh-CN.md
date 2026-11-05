@@ -103,7 +103,7 @@ ZCode 的插件机制（`plugin.json`）只能提供 MCP / skills / commands / h
 | `overlay.js` | 状态条本体（渲染进程注入，自包含 IIFE）。fixed 悬浮在**窗口最底部**（条下只留 3px 缝，给输入卡片加 margin-bottom 上移让位），rAF 每帧跟随；输入框定位要求 textarea 在视口下半部（排除设置页等处的输入元素）。 |
 | `inject-main.cjs` | 主进程 loader：向每个窗口注入 overlay.js + **触发式监听 db 写入**（fs.watch db 目录，有写入→去抖 300ms→查询推送；空闲零进程零轮询，仅 30s 兜底心跳）。查询走**常驻 python**（`zusage.py serve` 行协议；意外退出自动重启、30s 内 3 次判不稳定回退一次性 spawn、zusage.py mtime 变化自动重启；stdin EOF 随泵退出自清理）。 |
 | `patch_install.py` | asar 注入/卸载工具（install.py 的底层，可单独用）：在入口 `out/main/index.js` 尾部追加/剥离本工具的 dynamic import 行 → 重打包 → 自检 → 原子替换。待收尾包（`.tmp`）带来源身份 sidecar（源 asar 与 TMP 的 size/mtime/sha256），收尾前校验：ZCode 再次升级后拒绝用旧包覆盖新版。不制作也不依赖备份，卸载只动自己的注入行（其它工具后装的注入行不受影响）。幂等，自动替换旧注入行（迁移友好）。 |
-| `install_monitor.py` | 安装监控 / 收尾进程：**等 ZCode 进程退出的事件**（`WaitForMultipleObjects`，不是固定轮询——实测退出窗口只有几秒）后完成 asar 替换；替换前校验待收尾包的来源指纹，ZCode 又升级过就拒绝用旧包覆盖新版。可见模式提醒重启；静默模式（`ZUSAGE_MONITOR_QUIET=1`，钩子/看门狗自动拉起）无窗口，只写 `watchdog.log`。单实例锁去重，最长存活 24 小时。 |
+| `install_monitor.py` | 安装监控 / 收尾进程：**等 ZCode 进程退出的事件**（`WaitForMultipleObjects`，不是固定轮询——实测退出窗口只有几秒）后完成 asar 替换；替换前校验待收尾包的来源指纹，ZCode 又升级过就拒绝用旧包覆盖新版。**拉起走 WMI `Win32_Process.Create`**（父进程是 WmiPrvSE，不在宿主进程树/Job 里，不怕会话清理整树杀），失败才退 `CREATE_NO_WINDOW`+breakaway。可见模式提醒重启；静默模式（钩子/看门狗自动拉起）无窗口，只写 `watchdog.log`。单实例锁去重，最长存活 24 小时。 |
 | `runtime_lock.py` | 重启闭环原语（零依赖）：跨进程文件锁 + `.plugin-restart-required` 重启意图标记 + 加载哈希确认。同步/注入改了冷文件后写意图，客户端启动时由 loader 上报「实际加载的哈希」自动清除——「已修复待重启」和「修复失败/替换未落地」因此可区分，钩子只在待确认期间提醒。 |
 | `zusage.py` | 查询库 + CLI + 机器可读快照（`json` 子命令，状态条数据源）。 |
 | `zquota.py` | 额度/余额查询模块（额度条目的数据源）：三级 provider 解析、DeepSeek/智谱/OpenRouter 三家查询、自定义 `balanceUrl`/`balanceKind`、5 分钟缓存与失败保留。**唯一的出网点**，走防护闸（仅 https + 公网解析校验 + 拒绝重定向）。 |

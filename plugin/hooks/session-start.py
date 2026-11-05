@@ -165,6 +165,47 @@ def _restart_notice(data_dir):
         "hookEventName": "SessionStart", "additionalContext": message}}
 
 
+def _plugin_version(plugin_json):
+    """读取插件清单版本号（读不到返回空串）。"""
+    try:
+        data = json.loads(Path(plugin_json).read_text(encoding="utf-8"))
+        return str(data.get("version") or "")
+    except (OSError, ValueError):
+        return ""
+
+
+def _deployed_version(data_dir):
+    """数据目录当前部署的运行时对应的插件版本（随每次同步盖戳）。"""
+    try:
+        data = json.loads((data_dir / "runtime-version.json").read_text(encoding="utf-8"))
+        return str(data.get("version") or "")
+    except (OSError, ValueError):
+        return ""
+
+
+def _version_tuple(version):
+    """版本号 → 可比较元组；尾部零归一（1.4.1 == 1.4.1.0）。"""
+    parts = []
+    for chunk in str(version or "").split("."):
+        digits = "".join(ch for ch in chunk if ch.isdigit())
+        parts.append(int(digits) if digits else 0)
+    while len(parts) > 1 and parts[-1] == 0:
+        parts.pop()
+    return tuple(parts) or (0,)
+
+
+def _stamp_deployed_version(data_dir, version):
+    if not version:
+        return
+    try:
+        (data_dir / "runtime-version.json").write_text(
+            json.dumps({"version": version, "at": time.strftime("%Y-%m-%d %H:%M:%S")},
+                       ensure_ascii=False),
+            encoding="utf-8")
+    except OSError:
+        pass
+
+
 def _url_guard(url):
     """下载目标硬校验：仅 https + 域名白名单；主机名是 IP 字面量（环回/私有/保留段
     全覆盖）一律拒绝。URL 本是常量，此函数是纵深防御——防未来改常量时引入注入点。"""
@@ -390,20 +431,32 @@ def main():
     try:
         data_dir, runtime_files, repo_available = _paths()
         if repo_available:
-            synced = sync_runtime(REPO, data_dir, runtime_files)
-            if synced:
-                _log_sync(data_dir, "插件钩子同步运行时 %d 个文件：%s"
-                          % (len(synced), ", ".join(synced)))
+            # 防回滚闸：同步源（旧市场缓存/旧克隆）版本低于已部署版本时跳过——
+            # 否则旧运行时会盖掉数据目录里的新副本，安全修复一起被回退。
+            src_version = _plugin_version(REPO / "plugin" / ".zcode-plugin" / "plugin.json")
+            deployed = _deployed_version(data_dir)
+            if deployed and _version_tuple(src_version) < _version_tuple(deployed):
+                _log_sync(data_dir, "同步源版本 %s 旧于已部署 %s，跳过运行时同步（防回滚；"
+                          "确需降级请删数据目录 runtime-version.json）" % (src_version or "?", deployed))
+                synced = []
+            else:
+                synced = sync_runtime(REPO, data_dir, runtime_files)
+                if synced:
+                    _log_sync(data_dir, "插件钩子同步运行时 %d 个文件：%s"
+                              % (len(synced), ", ".join(synced)))
+                _stamp_deployed_version(data_dir, src_version)
             _record_restart(data_dir, synced, "hook-repo")
         elif not (data_dir / "watchdog.py").is_file():
             # 市场形态 + 数据目录无运行时 → 引导安装；随后照常走注入自检
             data_dir, synced = bootstrap_runtime(data_dir)
             _log_sync(data_dir, "插件钩子引导安装（GitHub main）写入 %d 个文件：%s"
                       % (len(synced), ", ".join(synced)))
+            _stamp_deployed_version(data_dir, _plugin_version(PLUGIN_ROOT / ".zcode-plugin" / "plugin.json"))
             _record_restart(data_dir, synced, "hook-bootstrap")
         else:
             # 市场形态 + 已有运行时 → 到期则在线刷新（检查期内零网络）
             _record_restart(data_dir, refresh_runtime(data_dir) or [], "hook-refresh")
+            _stamp_deployed_version(data_dir, _plugin_version(PLUGIN_ROOT / ".zcode-plugin" / "plugin.json"))
         sys.path.insert(0, str(data_dir))
         import watchdog
         watchdog.main(False)   # 注入自检：与计划任务同一实现（verbose=False 收输出）

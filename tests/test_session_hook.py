@@ -112,5 +112,24 @@ class RestartIntentTests(unittest.TestCase):
         self.assertIsNotNone(hook._restart_notice(self.data_dir))
 
 
+class VersionGuardTests(unittest.TestCase):
+    def test_version_tuple_ordering(self):
+        self.assertLess(hook._version_tuple("1.2.0"), hook._version_tuple("1.4.1"))
+        self.assertGreater(hook._version_tuple("1.10.0"), hook._version_tuple("1.9.9"))
+        self.assertEqual(hook._version_tuple(""), (0,))
+        self.assertEqual(hook._version_tuple("1.4.1"), hook._version_tuple("1.4.1.0"))
+
+    def test_deployed_stamp_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            self.assertEqual(hook._deployed_version(d), "")
+            hook._stamp_deployed_version(d, "1.4.1")
+            self.assertEqual(hook._deployed_version(d), "1.4.1")
+
+    def test_plugin_version_reader(self):
+        self.assertTrue(hook._plugin_version(REPO / "plugin" / ".zcode-plugin" / "plugin.json"))
+        self.assertEqual(hook._plugin_version(Path("Z:/nonexistent/plugin.json")), "")
+
+
 if __name__ == "__main__":
     unittest.main()

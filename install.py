@@ -158,11 +158,15 @@ def _decode_console(b):
 def run_text(cmd, timeout=None, env=None):
     """subprocess.run 的文本安全版：按字节捕获后走 _decode_console 兜底解码，
     返回的 CompletedProcess 与 text=True 同构（stdout/stderr 为 str）。
-    cmd 必须是字符串参数列表，绝不走 shell（无拼接、无 shell=True）。"""
+    cmd 必须是字符串参数列表，绝不走 shell（无拼接、无 shell=True）。
+    CREATE_NO_WINDOW：本工具常在无控制台宿主（pythonw 计划任务、ZCode 拉起的
+    钩子、静默监控）里跑，Windows 会给 tasklist/schtasks 这类控制台程序分配
+    可见终端（实测每次会话启动弹一窗），必须显式压掉。"""
     if not isinstance(cmd, (list, tuple)) or not all(isinstance(a, str) for a in cmd):
         raise TypeError("run_text 仅接受字符串参数列表（不走 shell）")
     r = subprocess.run(list(cmd), shell=False, capture_output=True,
-                       timeout=timeout, env=env)
+                       timeout=timeout, env=env,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     r.stdout = _decode_console(r.stdout)
     r.stderr = _decode_console(r.stderr)
     return r

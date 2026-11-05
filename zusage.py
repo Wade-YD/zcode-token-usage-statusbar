@@ -922,7 +922,8 @@ def _remote_exec(sids, rcfg):
     err = None
     payload = None
     try:
-        p = subprocess.run(cmd, capture_output=True, timeout=rcfg["timeout_s"])
+        p = subprocess.run(cmd, capture_output=True, timeout=rcfg["timeout_s"],
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         out = p.stdout.decode("utf-8", "replace")
         if p.returncode != 0:
             err = f"ssh rc={p.returncode}: {p.stderr.decode('utf-8', 'replace').strip()[:160]}"

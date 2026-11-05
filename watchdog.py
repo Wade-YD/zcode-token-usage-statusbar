@@ -79,9 +79,10 @@ def zcode_running() -> bool:
         if os.name == "nt":
             r = subprocess.run(
                 ["tasklist", "/FI", "IMAGENAME eq ZCode.exe", "/FO", "CSV", "/NH"],
-                capture_output=True, timeout=15)
+                capture_output=True, timeout=15, shell=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             return b"zcode.exe" in r.stdout.lower()
-        r = subprocess.run(["pgrep", "-x", "ZCode"], capture_output=True, timeout=15)
+        r = subprocess.run(["pgrep", "-x", "ZCode"], capture_output=True, timeout=15, shell=False)
         return r.returncode == 0
     except Exception:
         return False
@@ -104,7 +105,8 @@ def notify(title: str, text: str) -> bool:
             "$n.Dispose()"
         )
         r = subprocess.run(["powershell", "-NoProfile", "-Command", script],
-                           capture_output=True, timeout=NOTIFY_CMD_TIMEOUT)
+                           capture_output=True, timeout=NOTIFY_CMD_TIMEOUT, shell=False,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         return r.returncode == 0
     except Exception:
         return False

@@ -34,12 +34,31 @@
 - **等退出用事件，不用轮询**：Windows `OpenProcess(SYNCHRONIZE)` +
   `WaitForMultipleObjects`；实测退出窗口只有几秒，10 秒轮询经常整段错过。
   非 Windows / 句柄不可用才退化为 sleep。
-- 静默模式（`ZUSAGE_MONITOR_QUIET=1`）由钩子/看门狗拉起：`CREATE_NO_WINDOW` +
-  `CREATE_BREAKAWAY_FROM_JOB`，ZCode 退出时它必须还活着。
+- 静默模式（`ZUSAGE_MONITOR_QUIET=1`）由钩子/看门狗拉起；**WMI 通道不继承环境
+  变量，静默开关必须走 argv**（`install_monitor.py` 解析 `--quiet`）。
+- 拉起链（quiet）：**WMI `Win32_Process.Create` 优先**（父进程 WmiPrvSE，天然不在
+  调用方进程树/Job 里——宿主 Job 常拒绝 breakaway，树内监控会被整树杀，实测只活
+  几分钟）→ `CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB`（被拒留 stderr 线索）
+  → 普通 `CREATE_NO_WINDOW`。WMI 解释器必须是同目录 `pythonw.exe`（缺失即跳过
+  WMI，否则闪控制台窗）。
 - 单实例：`app.asar.zusage.monitor.lock` 排他锁（`runtime_lock.FileLock`），
   抢不到就静默退出；拉起前先试锁，已有实例则不再 spawn。
 - 监控是独立进程，**必须自己 `set_target(ASAR)` / `set_runtime(RUNTIME)`**，
   不继承拉起者的全局量（不同步会表现为"永远 missing、空转"）。
+- `ensure_monitor` 前置两道：`os.access(ASAR, W_OK)`（受保护目录拉监控是空转）+
+  `_sweep_stale_stages()`。
+
+## 无人值守宿主约束（MUST）
+
+- 本工具常在无控制台宿主里跑（pythonw 计划任务、ZCode 拉起的钩子、静默监控）：
+  Windows 会给 tasklist/powershell/schtasks/ssh 这类控制台程序分配**可见终端**。
+  所有探测/通知类 subprocess 一律 `CREATE_NO_WINDOW`（`install.py` 的 `run_text`
+  已统一，新调用点必须自带）。
+- repack/元数据的 mkstemp 残留靠 `_sweep_stale_stages()` 按 600s mtime 阈值清扫
+  （进程被 kill 时 finally 不执行）；只扫 `.app.asar.zusage.*` / `.zusage-meta.*`
+  两个自有点前缀，600s 阈值保证不碰活跃文件。
+- `install()` 在 repack 与写身份 sidecar 之间有秒级窗口，监控对 `untrusted` 宽限
+  一轮再判（`install_monitor` 主循环），不要见 untrusted 就退出。
 
 ## 重启标记生命周期（P0 语义）
 

@@ -48,6 +48,9 @@ TMP = ASAR.with_name("app.asar.zusage.tmp")
 POLL = 10            # 兜底轮询/事件等待的单次上限（秒）
 BYE = 8              # 成功提示停留秒数
 MAX_LIFETIME = 86400 # 最长存活 24 小时（防遗留进程）
+# WMI 通道不继承调用方环境：静默开关必须走 argv（--quiet 追加在位置参数之后）
+if "--quiet" in sys.argv[1:]:
+    os.environ["ZUSAGE_MONITOR_QUIET"] = "1"
 QUIET = os.environ.get("ZUSAGE_MONITOR_QUIET") == "1"
 
 # 关键：把 argv 的目标/运行时同步给 patch_install 的模块全局量。
@@ -92,7 +95,8 @@ def zcode_pids():
         try:
             r = subprocess.run(
                 ["tasklist", "/FI", "IMAGENAME eq ZCode.exe", "/FO", "CSV", "/NH"],
-                capture_output=True, shell=False)
+                capture_output=True, shell=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         except OSError:
             return None
         pids = set()
@@ -220,6 +224,11 @@ def main():
         now = time.time()
         if TMP.exists():
             result = finalize_tmp()
+            if result == "untrusted":
+                # install() 在 repack 与写身份 sidecar 之间有秒级窗口，等一轮再判
+                log("暂存包校验未过（可能正处于写入身份的窗口），宽限一轮后复查")
+                time.sleep(POLL)
+                result = finalize_tmp()
             if result == "published":
                 log("暂存替换完成（来源/内容校验通过）")
                 if QUIET:
