@@ -299,13 +299,32 @@ def repack(src_path: Path, modify: dict):
     return dst_path
 
 
-def entry_bytes_of(asar_path: Path) -> bytes:
+def _asar_file_bytes(asar_path: Path, name: str) -> bytes:
+    """读取 asar 包内单个文件的字节（name 为包内路径，如 "/out/main/index.js"）。"""
     with open(asar_path, "rb") as f:
         header, base = read_header(f)
         nodes = dict(iter_files(header))
-        node = nodes["/" + ENTRY]
+        node = nodes[name]
         f.seek(base + int(node["offset"]))
         return f.read(node["size"])
+
+
+def entry_bytes_of(asar_path: Path) -> bytes:
+    return _asar_file_bytes(asar_path, "/" + ENTRY)
+
+
+def asar_package_type(asar_path: Path):
+    """宿主 asar 根 package.json 的 "type" 字段："module" / "commonjs" / 缺键 ""。
+    读不到（坏 asar / 缺 package.json / 坏 JSON）返回 None——None 表示「不知道」，
+    语法检查对它双跑两种 goal，与显式 commonjs（单跑 .js）语义不同。"""
+    try:
+        pkg = json.loads(_asar_file_bytes(asar_path, "/package.json").decode("utf-8"))
+    except (OSError, ValueError, KeyError, AssertionError):
+        return None   # AssertionError：read_header 对坏 asar 的 pickle 前缀断言
+    if not isinstance(pkg, dict):
+        return ""
+    t = pkg.get("type")
+    return t if isinstance(t, str) else ""
 
 
 def self_check(asar_path: Path, expect=True):
@@ -321,24 +340,47 @@ def self_check(asar_path: Path, expect=True):
 
 
 def syntax_check(asar_path: Path):
-    """用 ZCode 自身当 node（ELECTRON_RUN_AS_NODE）对入口做语法检查；
-    找不到/无法运行 ZCode 可执行文件时跳过（自检是锦上添花，不应挡安装）。"""
+    """用 ZCode 实际可执行文件当 node（ELECTRON_RUN_AS_NODE）对入口做语法检查；
+    找不到/无法运行 ZCode 可执行文件时跳过（自检是锦上添花，不应挡安装）。
+
+    临时文件后缀决定 node --check 的解析 goal：宿主 package.json "type": "module"
+    的 ESM 入口（3.18.x 起的客户端）按 .js（CJS goal）解析必误报、fail-closed 挡安装
+    ——type 明确时按权威值单跑（module→.mjs / commonjs·缺键→.js）；读不到时双跑
+    .js→.mjs，任一通过即过（语法上 CJS⊂ESM，合法文件在两个 goal 下至少一个通过，
+    真语法错误两个都不过，零误报零漏报）。"""
     exe = ZCODE_EXE
     if not exe or not exe.is_file():
         print(L("  [check] 未找到 ZCode 可执行文件，跳过语法检查",
                 "  [check] ZCode executable not found; syntax check skipped"))
         return True
     src = entry_bytes_of(asar_path)
-    tmp_js = HERE / ".entry-check.js"
-    tmp_js.write_bytes(src)
+    ptype = asar_package_type(asar_path)
+    if ptype == "module":
+        suffixes = (".mjs",)          # 权威 ESM：单跑 .mjs
+    elif ptype is None:
+        suffixes = (".js", ".mjs")    # 读不到 package.json：双跑防误报
+    else:
+        suffixes = (".js",)           # commonjs/缺键：单跑 .js
     env = dict(os.environ, ELECTRON_RUN_AS_NODE="1")
-    try:
-        r = run_text([str(exe), "--check", str(tmp_js)], env=env)
-    except OSError as e:
-        r = None
-        run_err = str(e)
-    finally:
-        tmp_js.unlink(missing_ok=True)
+    r = None
+    run_err = ""
+    for suffix in suffixes:
+        fd, name = tempfile.mkstemp(dir=str(HERE), prefix=".entry-check.", suffix=suffix)
+        tmp_js = Path(name)
+        try:
+            os.close(fd)
+            tmp_js.write_bytes(src)
+            try:
+                r = run_text([str(exe), "--check", str(tmp_js)], env=env)
+            except OSError as e:
+                r = None
+                run_err = str(e)
+        finally:
+            tmp_js.unlink(missing_ok=True)
+        if r is None:
+            break   # 无法执行（非语法问题）：不重试，走跳过
+        if r.returncode == 0:
+            break   # 该 goal 通过，无需再试下一个后缀
     if r is None:
         print(L(f"  [check] 语法检查无法执行（{run_err}），跳过",
                 f"  [check] syntax check failed to run ({run_err}); skipped"))
@@ -622,19 +664,45 @@ def _spawn_monitor(quiet=True, epoch=None):
             return False
     base = subprocess.CREATE_NO_WINDOW if quiet else subprocess.CREATE_NEW_CONSOLE
     breakaway = getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0)
-    for extra in (breakaway, 0):   # Job 不允许 breakaway 时退回普通方式
-        try:
+    if quiet:
+        for extra in (breakaway, 0):   # WMI 已试过；Job 不允许 breakaway 时退回普通无窗方式
+            try:
+                subprocess.Popen(cmd, shell=False, cwd=str(HERE), env=env,
+                                 creationflags=base | extra, stdin=devnull,
+                                 stdout=devnull, stderr=devnull)
+                return True
+            except OSError:
+                continue
+    else:
+        try:   # 可见监控：优先带 breakaway 拉起，脱离宿主 Job 才能活到「客户端退出」的收尾窗口
             subprocess.Popen(cmd, shell=False, cwd=str(HERE), env=env,
-                             creationflags=base | extra, stdin=devnull,
-                             stdout=devnull if quiet else None,
-                             stderr=devnull if quiet else None)
+                             creationflags=base | breakaway, stdin=devnull,
+                             stdout=None, stderr=None)
             return True
         except OSError as e:
-            if extra and not quiet:
-                print(L(f"（Job 不允许 breakaway，已降级为普通拉起：{e}）",
-                        f"(Job rejected breakaway; fell back to a plain launch: {e})"),
-                      file=sys.stderr)
-            continue
+            # 树内监控会随宿主回收被整树杀，收尾只能搁浅（同 issue #208 根因）。
+            # WinError 5 与 AV 拦截同码无法区分，不做按码过滤——行为只会多一次
+            # WMI 尝试，永不劣于直接降级树内的基线。
+            interpreter = _wmi_interpreter()
+            if interpreter is not None and _spawn_via_wmi(
+                    [str(interpreter), str(monitor), "%.3f" % (epoch or time.time()),
+                     str(ASAR), str(RUNTIME), "--quiet"]):
+                print(L("（监控窗口无法脱离 ZCode 进程组，已改为后台静默监控：没有监控窗口、"
+                        "也无需保持任何窗口，完全退出 ZCode 后会自动完成替换）",
+                        "(The monitor window cannot detach from ZCode's process group; a silent background "
+                        "monitor was started instead — there is no window to keep open, and the replacement "
+                        "finishes automatically once ZCode quits completely)"))
+                return True
+            print(L(f"（Job 不允许 breakaway，已降级为普通拉起：{e}）",
+                    f"(Job rejected breakaway; fell back to a plain launch: {e})"),
+                  file=sys.stderr)
+            try:
+                subprocess.Popen(cmd, shell=False, cwd=str(HERE), env=env,
+                                 creationflags=base, stdin=devnull,
+                                 stdout=None, stderr=None)
+                return True
+            except OSError:
+                pass
     print(L("（监控进程拉起失败，不影响安装）",
             "(monitor failed to launch; installation is unaffected)"))
     return False
@@ -713,8 +781,8 @@ def install(finalize=False, quiet=False):
             clear_pending_meta()
             print(L("\n客户端运行中，但 asar 原子替换成功（运行中进程仍读旧数据）。",
                     "\nZCode is running, but the asar was replaced atomically (running processes keep reading the old data)."))
-            print(L("重启 ZCode 后悬浮条生效；已弹出监控窗口，确认生效后自动关闭。",
-                    "The floating bar activates after restarting ZCode; a monitor window has opened and will close itself once the load is confirmed."))
+            print(L("重启 ZCode 后悬浮条生效。已启动安装监控：若弹出了监控窗口，它会确认生效后自动关闭。",
+                    "The floating bar activates after restarting ZCode. An install monitor has been started: if a monitor window opened, it confirms the result and closes itself automatically."))
             cleanup_legacy_bak()
             if not quiet: launch_monitor(time.time())
             return True
@@ -724,8 +792,9 @@ def install(finalize=False, quiet=False):
                         f"\nReplacement while running failed ({e}). The .tmp is staged; a silent monitor will finish the swap once ZCode quits completely."))
                 ensure_monitor(quiet=True)
             else:
-                print(L(f"\n运行中替换失败（{e}）。已弹出监控窗口：完全退出 ZCode 后会自动完成替换，",
-                        f"\nReplacement while running failed ({e}). A monitor window has opened: it finishes the replacement once ZCode quits completely,"))
+                print(L(f"\n运行中替换失败（{e}）。已启动安装监控，完全退出 ZCode 后会自动完成替换；若弹出了监控窗口请勿关闭，",
+                        f"\nReplacement while running failed ({e}). An install monitor has been started; the replacement finishes once ZCode quits completely — "
+                        f"keep any monitor window open,"))
                 print(L(f'或之后手动执行：{_manual_cmd("install", "--finalize", "--asar", f"{ASAR}", "--runtime", f"{RUNTIME}")}',
                         f'or run manually afterwards: {_manual_cmd("install", "--finalize", "--asar", f"{ASAR}", "--runtime", f"{RUNTIME}")}'))
             if not quiet: launch_monitor(time.time())

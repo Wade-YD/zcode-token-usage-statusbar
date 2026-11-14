@@ -13,6 +13,7 @@ import tarfile
 import tempfile
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -129,6 +130,30 @@ class VersionGuardTests(unittest.TestCase):
     def test_plugin_version_reader(self):
         self.assertTrue(hook._plugin_version(REPO / "plugin" / ".zcode-plugin" / "plugin.json"))
         self.assertEqual(hook._plugin_version(Path("Z:/nonexistent/plugin.json")), "")
+
+
+class HookSelfCheckIndependentTests(unittest.TestCase):
+    """同步/引导/刷新失败不得连坐注入自检（内层 try 加固）：
+    sync_runtime 抛 OSError 时 watchdog.main 仍被调用。"""
+
+    def test_sync_failure_still_runs_self_check(self):
+        stub = unittest.mock.Mock()
+        saved = sys.modules.get("watchdog")
+        sys.modules["watchdog"] = stub
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                d = Path(tmp)
+                with unittest.mock.patch.object(hook, "_paths", return_value=(d, [], True)), \
+                     unittest.mock.patch.object(hook, "sync_runtime", side_effect=OSError("target busy")), \
+                     unittest.mock.patch.object(hook, "_deployed_version", return_value=""), \
+                     unittest.mock.patch.object(hook, "_log_err"):
+                    self.assertEqual(hook.main(), 0)
+                stub.main.assert_called_once_with(False)
+        finally:
+            if saved is None:
+                sys.modules.pop("watchdog", None)
+            else:
+                sys.modules["watchdog"] = saved
 
 
 if __name__ == "__main__":

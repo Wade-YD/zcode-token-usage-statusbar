@@ -430,33 +430,39 @@ def main():
     data_dir = Path.home() / ".zcode" / "zcode-token-usage-statusbar"
     try:
         data_dir, runtime_files, repo_available = _paths()
-        if repo_available:
-            # 防回滚闸：同步源（旧市场缓存/旧克隆）版本低于已部署版本时跳过——
-            # 否则旧运行时会盖掉数据目录里的新副本，安全修复一起被回退。
-            src_version = _plugin_version(REPO / "plugin" / ".zcode-plugin" / "plugin.json")
-            deployed = _deployed_version(data_dir)
-            if deployed and _version_tuple(src_version) < _version_tuple(deployed):
-                _log_sync(data_dir, "同步源版本 %s 旧于已部署 %s，跳过运行时同步（防回滚；"
-                          "确需降级请删数据目录 runtime-version.json）" % (src_version or "?", deployed))
-                synced = []
+        try:
+            if repo_available:
+                # 防回滚闸：同步源（旧市场缓存/旧克隆）版本低于已部署版本时跳过——
+                # 否则旧运行时会盖掉数据目录里的新副本，安全修复一起被回退。
+                src_version = _plugin_version(REPO / "plugin" / ".zcode-plugin" / "plugin.json")
+                deployed = _deployed_version(data_dir)
+                if deployed and _version_tuple(src_version) < _version_tuple(deployed):
+                    _log_sync(data_dir, "同步源版本 %s 旧于已部署 %s，跳过运行时同步（防回滚；"
+                              "确需降级请删数据目录 runtime-version.json）" % (src_version or "?", deployed))
+                    synced = []
+                else:
+                    synced = sync_runtime(REPO, data_dir, runtime_files)
+                    if synced:
+                        _log_sync(data_dir, "插件钩子同步运行时 %d 个文件：%s"
+                                  % (len(synced), ", ".join(synced)))
+                    _stamp_deployed_version(data_dir, src_version)
+                _record_restart(data_dir, synced, "hook-repo")
+            elif not (data_dir / "watchdog.py").is_file():
+                # 市场形态 + 数据目录无运行时 → 引导安装；随后照常走注入自检
+                data_dir, synced = bootstrap_runtime(data_dir)
+                _log_sync(data_dir, "插件钩子引导安装（GitHub main）写入 %d 个文件：%s"
+                          % (len(synced), ", ".join(synced)))
+                _stamp_deployed_version(data_dir, _plugin_version(PLUGIN_ROOT / ".zcode-plugin" / "plugin.json"))
+                _record_restart(data_dir, synced, "hook-bootstrap")
             else:
-                synced = sync_runtime(REPO, data_dir, runtime_files)
-                if synced:
-                    _log_sync(data_dir, "插件钩子同步运行时 %d 个文件：%s"
-                              % (len(synced), ", ".join(synced)))
-                _stamp_deployed_version(data_dir, src_version)
-            _record_restart(data_dir, synced, "hook-repo")
-        elif not (data_dir / "watchdog.py").is_file():
-            # 市场形态 + 数据目录无运行时 → 引导安装；随后照常走注入自检
-            data_dir, synced = bootstrap_runtime(data_dir)
-            _log_sync(data_dir, "插件钩子引导安装（GitHub main）写入 %d 个文件：%s"
-                      % (len(synced), ", ".join(synced)))
-            _stamp_deployed_version(data_dir, _plugin_version(PLUGIN_ROOT / ".zcode-plugin" / "plugin.json"))
-            _record_restart(data_dir, synced, "hook-bootstrap")
-        else:
-            # 市场形态 + 已有运行时 → 到期则在线刷新（检查期内零网络）
-            _record_restart(data_dir, refresh_runtime(data_dir) or [], "hook-refresh")
-            _stamp_deployed_version(data_dir, _plugin_version(PLUGIN_ROOT / ".zcode-plugin" / "plugin.json"))
+                # 市场形态 + 已有运行时 → 到期则在线刷新（检查期内零网络）
+                _record_restart(data_dir, refresh_runtime(data_dir) or [], "hook-refresh")
+                _stamp_deployed_version(data_dir, _plugin_version(PLUGIN_ROOT / ".zcode-plugin" / "plugin.json"))
+        except BaseException:
+            # 同步/引导/刷新失败（如目标 .py 被占用导致原子替换抛错）不得连坐注入
+            # 自检：留痕后继续——自检行（下一行起）独立于同步成败，仍是孤儿待收尾
+            # 包在本会话内复活收尾的入口（见 .zcode/rules/hook-bootstrap.md）。
+            _log_err()
         sys.path.insert(0, str(data_dir))
         import watchdog
         watchdog.main(False)   # 注入自检：与计划任务同一实现（verbose=False 收输出）

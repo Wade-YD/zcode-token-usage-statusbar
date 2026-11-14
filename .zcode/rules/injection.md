@@ -41,6 +41,24 @@
   几分钟）→ `CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB`（被拒留 stderr 线索）
   → 普通 `CREATE_NO_WINDOW`。WMI 解释器必须是同目录 `pythonw.exe`（缺失即跳过
   WMI，否则闪控制台窗）。
+- 拉起链（可见，手动安装）：`CREATE_NEW_CONSOLE | CREATE_BREAKAWAY_FROM_JOB` 被拒
+  时**先试 WMI 静默幸存监控**（pythonw `--quiet`，argv 同构）并提示"已改为后台静默
+  监控"，WMI 也不可用才降级树内普通创建——树内监控会随宿主回收被杀，收尾搁浅
+  （上游 issue #208 同源）。breakaway 被拒与 AV 拦截同为 WinError 5，不做按码过滤；
+  行为只会多一次 WMI 尝试，永不劣于直接降级的基线。提示文案要两种拉起结果都成立
+  （"已启动安装监控"而非"已弹出监控窗口"）。
+
+## 语法自检的解析 goal（MUST）
+
+- `syntax_check` 把入口字节写进临时文件用 ZCode 自身 `--check`，**后缀决定 goal**：
+  runtime 目录无 package.json，`.js` 按 CJS goal 解析——宿主入口是 ESM（顶层
+  import）时必误报、fail-closed 挡安装（上游 issue #255 实测事故）。
+- 后缀按 asar 根 `package.json` 的 `"type"` 选（`asar_package_type()`）：
+  `module`→单跑 `.mjs`；`commonjs`/缺键→单跑 `.js`；**读不到→双跑 `.js`→`.mjs`，
+  任一通过即过**（语法上 CJS⊂ESM，合法文件至少一个 goal 过，真语法错误两个都
+  不过——零误报零漏报，且不赌 node 版本行为：node ≥23 对无上下文 `.js` 有 ESM
+  自动探测，老 node 按 CJS）。
+- 临时文件必须 `mkstemp(dir=HERE, suffix=选定后缀)`——mkstemp 丢 suffix 检查就失效。
 - 单实例：`app.asar.zusage.monitor.lock` 排他锁（`runtime_lock.FileLock`），
   抢不到就静默退出；拉起前先试锁，已有实例则不再 spawn。
 - 监控是独立进程，**必须自己 `set_target(ASAR)` / `set_runtime(RUNTIME)`**，
