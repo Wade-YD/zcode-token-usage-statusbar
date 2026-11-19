@@ -341,7 +341,7 @@
       '<label><input type="checkbox" data-k="win"><span>' + L("会话累计", "Session total") + '<em>' + L("当前会话 tokens / 轮数 / 次数", "session tokens / turns / requests") + '</em></span></label>' +
       '<label><input type="checkbox" data-k="tools"><span>' + L("工具调用", "Tool calls") + '<em>' + L("当前会话，悬停看各工具明细与错误", "per-session, hover for per-tool details and errors") + '</em></span></label>' +
       '<label><input type="checkbox" data-k="today"><span>' + L("今日合计", "Today's total") + '<em>' + L("今天所有会话的消耗", "consumption of all sessions today") + '</em></span></label>' +
-      '<label><input type="checkbox" data-k="sub"><span>' + L("子代理", "Sub-agents") + '<em>' + L("后台子代理消耗，点击条目看明细面板", "background sub-agent usage, click the item for the detail panel") + '</em></span></label>' +
+      '<label><input type="checkbox" data-k="sub"><span>' + L("子代理", "Sub-agents") + '<em>' + L("后台子代理消耗（已计入会话累计），点击条目看明细面板", "background sub-agent usage (included in the session total); click the item for the detail panel") + '</em></span></label>' +
       '<label><input type="checkbox" data-k="quota"><span>' + L("额度", "Quota") + '<em>' + L("套餐剩余（5 小时/周）或 API 余额；开启即联网查询（约 5 分钟一次）", "plan remaining (5h/weekly) or API balance; ON = queries the provider about every 5 min") + '</em></span></label>' +
       '<div class="hr"></div>' +
       '<div class="cap">' + L("上下文窗口", "Context window") + '</div>' +
@@ -622,7 +622,7 @@
           '<span class="v">' + fmt(sess.total) + "</span>" +
           cachePct(sess.cache_read, sess.input) +
           '<span class="dim">' + (sess.turns || 0) + L("轮 ", " turns · ") + (sess.requests || 0) + L("次", " req") + "</span>",
-          L("会话累计：当前会话全部请求的 token 消耗", "Session total: tokens of all requests in the current session") + "\n" + ioc(sess.input, sess.output, sess.cache_read, sess.reasoning, sess.cache_write) +
+          L("会话累计：当前会话全部请求的 token 消耗（含子代理）", "Session total: tokens of all requests in the current session (incl. sub-agents)") + "\n" + ioc(sess.input, sess.output, sess.cache_read, sess.reasoning, sess.cache_write) +
           "\n" + (sess.turns || 0) + L(" 轮 · ", " turns · ") + (sess.requests || 0) + L(" 次请求", " requests") +
           (sess.tool_calls ? L(" · 工具调用 ", " · Tool calls ") + sess.tool_calls : "") +
           (sess.retries ? L(" · 重试 ", " · Retries ") + sess.retries : "") +
@@ -656,7 +656,7 @@
         it(ico('<path d="M6 3v12"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>') +
           '<span class="v">' + fmt(d.sub.total) + "</span>" +
           (d.sub.active ? '<span class="ok dot">●</span>' : ""),
-          L("子代理：当前会话的后台子代理消耗（独立统计，不计入会话累计）", "Sub-agents: background sub-agent usage of the current session (tracked separately, not counted in the session total)") + "\n" +
+          L("子代理：当前会话的后台子代理消耗（已计入会话累计，此处单列便于对照）", "Sub-agents: background sub-agent usage of the current session (included in the session total; listed here for comparison)") + "\n" +
           ioc(d.sub.input, d.sub.output, d.sub.cache_read, d.sub.reasoning, d.sub.cache_write) +
           L("，共 ", ", ") + (d.sub.requests || 0) + L(" 次", " requests in total") + (d.sub.active ? L(" · 运行中", " · running") : "") +
           "\n" + L("点击条目打开面板，查看每个子代理的具体消耗", "Click the item to open the panel with per-sub-agent details"), "zu-sub");
@@ -1064,7 +1064,7 @@
       head.textContent = L("子代理明细", "Sub-agent details");
       var ver = document.createElement("span");
       ver.className = "pver";
-      ver.textContent = L("独立统计 · 不计入会话累计", "Tracked separately · not counted in session total");
+      ver.textContent = L("已计入会话累计 · 此处单列对照", "Included in the session total · listed here for comparison");
       head.appendChild(ver);
       subPanel.appendChild(head);
       if (!sub || (!sub.total && !sub.active)) {

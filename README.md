@@ -34,7 +34,7 @@ Token consumption of the latest turn, plus cache hit rate, model request count, 
 
 ![Session total tooltip](docs/tour/shots/en/item-4.png)
 
-Total consumption of all requests in the current session, with turn/request counts; code changes (+added / −removed lines and file count) are part of this item's details. Each conversation window shows only its own data — multiple windows never mix. Hover for the five-way breakdown.
+Total consumption of all requests in the current session (sub-agents included), with turn/request counts — the sub-agent share is listed separately in the total. Code changes (+added / −removed lines and file count) are part of this item's details. Each conversation window shows only its own data — multiple windows never mix. Hover for the five-way breakdown.
 
 ### ⑤ Tool Calls
 
@@ -52,7 +52,7 @@ Token consumption across all of today's sessions, aggregated across conversation
 
 ![Sub-agent detail panel](docs/tour/shots/en/item-7.png)
 
-Token usage of background sub-agents in the current session, tracked separately from the session total; a blue ● means one is running right now. Hover shows a summary; clicking opens a fixed detail panel with tabs for the summary and each sub-agent's dispatch task name plus its input/output/cache/thinking breakdown.
+Token usage of background sub-agents in the current session — included in the session total and listed here side-by-side for comparison; a blue ● means one is running right now. Hover shows a summary; clicking opens a fixed detail panel with tabs for the summary and each sub-agent's dispatch task name plus its input/output/cache/thinking breakdown.
 
 ### ⑧ Quota
 

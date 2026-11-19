@@ -136,25 +136,93 @@ def _scan_session_ids(con):
 
 
 def session_usage(con, sid):
-    # last_request_input 取最近一次 completed 请求的 input_tokens（= 当前上下文容量）。
-    # 不能用 max(input_tokens)：会话压缩后 input 骤降，峰值永远不回落（v28 修复）。
+    # 会话累计 = 主会话 + 全部后代会话（子代理/侧聊子会话/孙代，session.parent_id 递归）。
+    # last_request_input 取最近一次 completed 请求的 input_tokens（= 当前上下文容量），
+    # 必须钉死主会话 sid：WHERE 扩到后代后不能用相关子查询（m.session_id 会命中子会话，
+    # 主会话容量被污染）。不能用 max(input_tokens)：会话压缩后 input 骤降，峰值永远不回落
+    # （v28 修复）。turns 按 session_id||':'||turn_id 去重：turn_id 跨会话可能重复，
+    # 直接 distinct 会塌。
     r = con.execute(
-        """select count(*), coalesce(sum(input_tokens),0), coalesce(sum(output_tokens),0),
+        """with recursive subs(id) as (
+               select id from session where parent_id = ?
+               union all
+               select s.id from session s join subs on s.parent_id = subs.id
+           )
+           select count(*), coalesce(sum(input_tokens),0), coalesce(sum(output_tokens),0),
                   coalesce(sum(reasoning_tokens),0), coalesce(sum(cache_read_input_tokens),0),
                   coalesce(sum(cache_creation_input_tokens),0), coalesce(sum(computed_total_tokens),0),
                   coalesce(sum(tool_call_count),0),
                   (select m2.input_tokens from model_usage m2
-                    where m2.session_id = m.session_id and m2.status = 'completed'
+                    where m2.session_id = ? and m2.status = 'completed'
                     order by m2.completed_at desc, m2.id desc limit 1),
-                  count(distinct turn_id), coalesce(sum(retry_count),0)
-           from model_usage m where m.session_id=? and status='completed'""",
-        (sid,),
+                  count(distinct m.session_id || ':' || m.turn_id), coalesce(sum(retry_count),0)
+           from model_usage m
+           where m.status='completed' and (m.session_id=? or m.session_id in (select id from subs))""",
+        (sid, sid, sid),
     ).fetchone()
     return {
         "requests": r[0], "input": r[1], "output": r[2], "reasoning": r[3],
         "cache_read": r[4], "cache_write": r[5], "total": r[6], "tool_calls": r[7],
         "last_request_input": r[8] or 0, "turns": r[9], "retries": r[10],
     }
+
+
+_ROOT_WALK_MAX = 20   # parent 链深度保护：正常 ≤3 层，脏数据成环到此为止不挂死
+
+
+def _resolve_root_sid(con, sid):
+    """沿 session.parent_id 向上走到根主会话（parent_id 为 NULL 或无 session 行为止）。
+    子代理/侧聊子会话归到主会话；查不到 session 行时原样返回；深度 ≤20 防环。"""
+    cur = sid
+    for _ in range(_ROOT_WALK_MAX):
+        r = con.execute("select parent_id from session where id=?", (cur,)).fetchone()
+        if r is None or not r[0]:
+            return cur
+        cur = r[0]
+    return cur
+
+
+def _descendant_ids(con, sid):
+    """递归 CTE：sid 的全部后代会话 id（子代理、侧聊子会话、孙代，逐层展开）。"""
+    return [r[0] for r in con.execute(
+        """with recursive subs(id) as (
+               select id from session where parent_id = ?
+               union all
+               select s.id from session s join subs on s.parent_id = subs.id
+           ) select id from subs""", (sid,))]
+
+
+def _subtree_last_at(con, sid):
+    """子树（主+后代）max(completed_at)：子代理跑着时主会话仍算活跃。
+    走递归 CTE 子查询而非 IN(?,…) 参数列表——后代数量超 SQLite 变量上限会炸。"""
+    r = con.execute(
+        """with recursive subs(id) as (
+               select id from session where parent_id = ?
+               union all
+               select s.id from session s join subs on s.parent_id = subs.id
+           )
+           select max(completed_at) from model_usage
+           where session_id = ? or session_id in (select id from subs)""",
+        (sid, sid)).fetchone()
+    return r[0] if r else None
+
+
+def _subs_usage_row(con, sid):
+    """后代（不含主会话）completed 行聚合一行：requests, total, input, output,
+    cache_read, reasoning, cache_write, max(completed_at)。无后代时 requests=0。"""
+    return con.execute(
+        """with recursive subs(id) as (
+               select id from session where parent_id = ?
+               union all
+               select s.id from session s join subs on s.parent_id = subs.id
+           )
+           select count(*), coalesce(sum(computed_total_tokens),0), coalesce(sum(input_tokens),0),
+                  coalesce(sum(output_tokens),0), coalesce(sum(cache_read_input_tokens),0),
+                  coalesce(sum(reasoning_tokens),0), coalesce(sum(cache_creation_input_tokens),0),
+                  max(completed_at)
+           from model_usage
+           where status='completed' and session_id in (select id from subs)""",
+        (sid,)).fetchone()
 
 
 def range_usage(con, start_ms, end_ms):
@@ -205,12 +273,18 @@ def model_usage(con, days=7):
 # ---------- 展示 ----------
 
 def render_current(con):
-    """当前会话 = _scan_session_ids 最近活跃的会话（子代理会话也在候选内）。"""
+    """当前会话 = _scan_session_ids 最近活跃的会话归并到根主会话（子代理运行中不翻转显示）。"""
     rows = _scan_session_ids(con)
-    sess, last_at = None, 0
+    sess, last_at, sub_total = None, 0, 0
     if rows:
-        sid, last_at = max(rows, key=lambda r: r[1])
+        sid = _resolve_root_sid(con, max(rows, key=lambda r: r[1])[0])
         sess = con.execute("select * from session where id=?", (sid,)).fetchone()
+        if sess is not None:
+            # 活跃与"其中子代理"小计按子树（主+后代）算：子代理跑着时主会话应显示 🟢 活跃
+            last_at = _subtree_last_at(con, sid) or 0
+            dsids = _descendant_ids(con, sid)
+            if dsids:
+                sub_total = _subs_usage_row(con, sid)[1]
     lines = []
     if sess is not None:
         u = session_usage(con, sess["id"])
@@ -223,11 +297,13 @@ def render_current(con):
             L(f"  {u['turns']} 轮 / {u['requests']} 次请求 / {u['tool_calls']} 次工具调用",
               f"  {u['turns']} turns / {u['requests']} requests / {u['tool_calls']} tool calls")
         )
+        subtxt = L(f"（其中子代理 {fmt(sub_total)}）", f" (incl. subagents {fmt(sub_total)})") \
+            if sub_total > 0 else ""
         lines.append(
             L(f"  input {fmt(u['input'])} (其中 cache read {fmt(u['cache_read'])})  "
               f"output {fmt(u['output'])}  合计 {fmt(u['total'])}",
               f"  input {fmt(u['input'])} (incl. cache read {fmt(u['cache_read'])})  "
-              f"output {fmt(u['output'])}  total {fmt(u['total'])}")
+              f"output {fmt(u['output'])}  total {fmt(u['total'])}") + subtxt
         )
         lines.append(L(f"  上下文容量 ≈ {fmt(u['last_request_input'])} tokens (最近一次请求输入)",
                        f"  context capacity ≈ {fmt(u['last_request_input'])} tokens (latest request input)"))
@@ -566,11 +642,14 @@ def render_session_detail(con, prefix):
             lines.append(
                 f"    {r['model_id']:<24} {r['n']:,}req  in {fmt(r[2])}  out {fmt(r[3])}  "
                 f"{L('合计', 'total')} {fmt(r[4])}")
+    # 子会话明细按 parent_id 归并（v1.4.3）：不再要求 query_source='subagent'——
+    # 侧聊子会话（"Selection side chat"，main_turn、无 sess_subagent 前缀）同样挂
+    # parent_id，旧条件会漏掉它们的消耗。
     sub_rows = con.execute(
         """select m.session_id, coalesce(s2.title,''), count(*),
                   coalesce(sum(m.computed_total_tokens),0), max(m.completed_at)
            from model_usage m join session s2 on m.session_id = s2.id
-           where m.query_source='subagent' and s2.parent_id=? and m.status='completed'
+           where s2.parent_id=? and m.status='completed'
            group by m.session_id order by max(m.completed_at) desc""", (sid,)).fetchall()
     if sub_rows:
         tasks = _sub_agent_tasks(con, sid)
@@ -589,28 +668,36 @@ def render_session_detail(con, prefix):
 
 
 def _light_snapshot(con, sid, cfg):
-    """recent 池轻量行（v8 瘦身）：两条聚合 SQL 出齐顶层计数，明细字段给空结构。
+    """recent 池轻量行（v8 瘦身）：聚合 SQL 出齐顶层计数（含子代理），明细字段给空结构。
     状态条只渲染 1 个会话，recent 长尾行仅作会话切换兜底；兜底候选（force + latest +
     最近活跃前 2）恒为完整快照，轻量行只在极端长尾被兜底选中时降级显示（缺明细不缺计数）。
-    sub.list 聚合数字置 0 而非缺失：overlay 的子代理面板/汇总按字段渲染，结构必须完整。"""
+    sub 聚合为真值、list 置空（v1.4.3）：overlay 的"子代理"条目直接显示 d.sub.total，
+    结构必须完整；长尾行不逐个查明细。"""
     u = session_usage(con, sid)
     srow = con.execute(
         "select title, summary_additions, summary_deletions, summary_files, parent_id from session where id=?",
         (sid,),
     ).fetchone()
-    lr = con.execute("select max(completed_at) from model_usage where session_id=?", (sid,)).fetchone()
+    # 活跃按子树（主+后代）max(completed_at)：与完整快照口径一致（子代理跑着时主会话行活跃）
+    last_at = _subtree_last_at(con, sid)
     now_ms = int(time.time() * 1000)
+    sub = {"requests": 0, "total": 0, "input": 0, "output": 0, "cache_read": 0,
+           "reasoning": 0, "cache_write": 0, "active": False, "list": []}
+    if _descendant_ids(con, sid):
+        r = _subs_usage_row(con, sid)
+        sub = {"requests": r[0], "total": r[1], "input": r[2], "output": r[3],
+               "cache_read": r[4], "reasoning": r[5], "cache_write": r[6],
+               "active": bool(r[7] and now_ms - r[7] < 30000), "list": []}
     return {
         "sid": sid,
         "title": (srow["title"] if srow is not None else "") or "",
-        "active": bool(lr[0] and now_ms - lr[0] < SESSION_TIMEOUT_MS),
+        "active": bool(last_at and now_ms - last_at < SESSION_TIMEOUT_MS),
         "turns": u["turns"], "requests": u["requests"], "input": u["input"],
         "output": u["output"], "reasoning": u["reasoning"], "cache_read": u["cache_read"],
         "cache_write": u["cache_write"], "total": u["total"], "tool_calls": u["tool_calls"],
         "retries": u["retries"], "ctx": u["last_request_input"],
-        "updated": (_ts(lr[0]).strftime("%H:%M:%S") if lr[0] else ""),
-        "sub": {"requests": 0, "total": 0, "input": 0, "output": 0, "cache_read": 0,
-                "reasoning": 0, "cache_write": 0, "active": False, "list": []},
+        "updated": (_ts(last_at).strftime("%H:%M:%S") if last_at else ""),
+        "sub": sub,
         "tools": {"total": u["tool_calls"], "errors": 0, "list": []},
         "last_turn": dict(_EMPTY_TURN),
         "last": {"duration_ms": 0, "ttft_ms": 0, "model": "", "tps": 0,
@@ -620,7 +707,7 @@ def _light_snapshot(con, sid, cfg):
                  "files": (srow["summary_files"] if srow is not None else None)},
         "ctx_exc": 0,
         "context_window": cfg["context_window"], "context_auto": False,
-        "last_at": (lr[0] if lr[0] else 0),
+        "last_at": (last_at if last_at else 0),
         "is_sub": sid.startswith("sess_subagent"),
         "parent": (srow["parent_id"] if srow is not None else None),
     }
@@ -750,8 +837,9 @@ def _session_snapshot(con, sid, cfg):
             lt = {"requests": r[0], "retries": 0, "tool_calls": 0, "tool_errors": 0,
                   "input": r[1], "output": r[2], "reasoning": r[6], "cache_read": r[5],
                   "cache_write": r[7], "total": r[3], "duration_ms": r[4], "ttft_ms": 0}
-    lr = con.execute("select max(completed_at) from model_usage where session_id=?", (sid,)).fetchone()
-    active = bool(lr and lr[0] and int(time.time() * 1000) - lr[0] < SESSION_TIMEOUT_MS)
+    # 活跃按子树（主+后代）max(completed_at)：子代理跑着时主会话行是活跃态（v1.4.3 口径）
+    last_at = _subtree_last_at(con, sid)
+    active = bool(last_at and int(time.time() * 1000) - last_at < SESSION_TIMEOUT_MS)
     ctx_auto = lookup_context_window(last["model_id"]) if last else None
     # 生成速度：输出 token ÷ 生成耗时；含思考（或 Claude 系列不单独上报思考）且
     # started_at 可用时窗口前移到 started_at（见 rate_of/hides_reasoning）；
@@ -764,6 +852,9 @@ def _session_snapshot(con, sid, cfg):
              last["first_token_at"], last["completed_at"], last["started_at"],
              last["model_id"]))
         tps = tps or 0
+    # "其中子代理"明细按 parent_id 归并（v1.4.3）：不再要求 query_source='subagent'——
+    # 侧聊子会话（"Selection side chat"，main_turn、无 sess_subagent 前缀）同样挂
+    # parent_id，旧条件会漏掉它们的消耗（顶层 session_usage 已含全部后代，明细须对得上账）。
     sub_rows = con.execute(
         """select m.session_id, coalesce(m.agent,''), coalesce(s2.title,''), count(*),
                   coalesce(sum(m.computed_total_tokens),0),
@@ -771,7 +862,7 @@ def _session_snapshot(con, sid, cfg):
                   coalesce(sum(m.cache_read_input_tokens),0), coalesce(sum(m.reasoning_tokens),0),
                   coalesce(sum(m.cache_creation_input_tokens),0), max(m.completed_at), s2.time_created
            from model_usage m join session s2 on m.session_id = s2.id
-           where m.query_source='subagent' and s2.parent_id=? and m.status='completed'
+           where s2.parent_id=? and m.status='completed'
            group by m.session_id order by max(m.completed_at) desc""",
         (sid,),
     ).fetchall()
@@ -831,7 +922,7 @@ def _session_snapshot(con, sid, cfg):
         "tool_calls": u["tool_calls"] if u else 0,
         "retries": u["retries"] if u else 0,
         "ctx": u["last_request_input"] if u else 0,
-        "updated": (_ts(lr[0]).strftime("%H:%M:%S") if lr and lr[0] else ""),
+                    "updated": (_ts(last_at).strftime("%H:%M:%S") if last_at else ""),
         "sub": sub,
         "tools": tools,
         "last_turn": lt,
@@ -859,7 +950,7 @@ def _session_snapshot(con, sid, cfg):
         ).fetchone()[0],
         "context_window": ctx_auto or cfg["context_window"],
         "context_auto": ctx_auto is not None,
-        "last_at": (lr[0] if lr and lr[0] else 0),
+                    "last_at": (last_at if last_at else 0),
         "is_sub": sid.startswith("sess_subagent"),
         "parent": (srow["parent_id"] if srow is not None else None),
     }
@@ -1029,6 +1120,8 @@ def snapshot(force_sid="", include_quota=False, quota_enabled=True):
             remote_by, remote_today, remote_err = _remote_fetch(force_sids, have_local, rcfg)
         latest_sid = max(rows, key=lambda r: r[1])[0] if rows else None
         if latest_sid:
+            # 最新活跃可能是子代理会话：归并到根主会话再出快照（"当前会话"不翻转成子代理）
+            latest_sid = _resolve_root_sid(con, latest_sid)
             base = _session_snapshot(con, latest_sid, cfg)
         else:
             # 空库（无任何 completed 请求）fallback：字段必须与 _session_snapshot 对齐，

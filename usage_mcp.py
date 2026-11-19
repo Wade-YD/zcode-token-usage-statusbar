@@ -51,12 +51,12 @@ TOOLS = [
         "name": "token_usage",
         "description": (
             L("查询 ZCode 的 token 用量（数据来自本地 db.sqlite，只读）。"
-              "scope 可选: current(当前会话+今日,默认), today, week, days:N(近N天每日), "
-              "sessions:N(最近N个会话), models:days(按模型), speed[:N](最近N次调用速度,含口径与覆盖率), session:<id前缀>(指定会话,含按模型与子代理明细), "
+              "scope 可选: current(当前会话+今日,默认;会话合计含其全部子代理), today, week, days:N(近N天每日), "
+              "sessions:N(最近N个会话), models:days(按模型), speed[:N](最近N次调用速度,含口径与覆盖率), session:<id前缀>(指定会话,合计含子代理;含按模型与子代理明细), "
               "workspace:<目录关键词>(按工作区聚合主会话+子代理,含按会话与按模型明细)。",
               "Query ZCode token usage (from the local db.sqlite, read-only). "
-              "scope: current(current session+today, default), today, week, days:N(last N days per day), "
-              "sessions:N(last N sessions), models:days(by model), speed[:N](speed of last N calls, with basis and coverage), session:<id prefix>(specific session, with per-model and subagent details), "
+              "scope: current(current session+today, default; session totals include sub-agents), today, week, days:N(last N days per day), "
+              "sessions:N(last N sessions), models:days(by model), speed[:N](speed of last N calls, with basis and coverage), session:<id prefix>(specific session, totals include sub-agents; with per-model and subagent details), "
               "workspace:<dir keyword>(aggregate a workspace's main sessions+subagents, with per-session and per-model details).")
         ),
         "inputSchema": {
