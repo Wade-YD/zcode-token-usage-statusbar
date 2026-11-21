@@ -248,5 +248,43 @@ class SnapshotSubTests(unittest.TestCase):
         self.assertEqual(d["total"], 110)
 
 
+class RecentSessionsTests(unittest.TestCase):
+    """sessions 列表树口径（v1.4.4 P2 统一）：子会话不成行、用量并入父链根。"""
+
+    def setUp(self):
+        zusage._AGG_CACHE.clear()
+
+    def test_tree_rollup_hides_child_rows(self):
+        db = MockDB()
+        db.session("m1", title="MAIN")
+        db.session("sub1", parent="m1", title="sub")
+        db.session("g1", parent="sub1", title="grand")
+        db.req("m1", inp=100, out=10)
+        db.req("sub1", qs="subagent", inp=1000, out=100)
+        db.req("g1", inp=250, out=25)
+        rows = zusage.recent_sessions(db.con, 10)
+        self.assertEqual([r[0] for r in rows], ["m1"])                  # 子/孙会话不成行
+        self.assertEqual(rows[0][3], 3)                                 # requests = 全树
+        self.assertEqual(rows[0][6], 100 + 10 + 1000 + 100 + 250 + 25)  # total = 全树
+
+    def test_orphan_usage_row_keeps_own_line(self):
+        # 无 session 行的孤儿 usage：无法归并，保留自成一行（title 兜底"(无标题)"）
+        db = MockDB()
+        db.session("m1")
+        db.req("m1", inp=100, out=10)
+        db.req("orphan-sid", inp=50, out=5)
+        rows = zusage.recent_sessions(db.con, 10)
+        self.assertEqual(sorted(r[0] for r in rows), ["m1", "orphan-sid"])
+
+    def test_cycle_no_hang_no_child_rows(self):
+        # 脏环：有限步返回、不重复呈现（环内成员两端都有 parent，全部让位）
+        db = MockDB()
+        db.session("a", parent="b")
+        db.session("b", parent="a")
+        db.req("a", inp=1, out=1)
+        db.req("b", inp=2, out=2)
+        self.assertEqual([r[0] for r in zusage.recent_sessions(db.con, 10)], [])
+
+
 if __name__ == "__main__":
     unittest.main()

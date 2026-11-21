@@ -246,15 +246,39 @@ def daily_usage(con, days):
 
 
 def recent_sessions(con, limit=10):
-    return con.execute(
-        """select s.id, coalesce(s.title,'(无标题)'), coalesce(s.directory,''),
-                  count(m.id), coalesce(sum(m.input_tokens),0), coalesce(sum(m.output_tokens),0),
-                  coalesce(sum(m.computed_total_tokens),0), max(m.completed_at)
-           from model_usage m left join session s on s.id = m.session_id
-           where m.status='completed'
-           group by m.session_id order by max(m.completed_at) desc limit ?""",
-        (limit,),
-    ).fetchall()
+    """最近 N 个主会话（v1.4.4 树口径）：子会话不单独成行，completed 用量并入父链根会话，
+    与 session_usage 全树口径同值——消除"子代理行与父会话行重复呈现同一份 token"的漂移。
+    parent 悬挂/环上行有限步（_ROOT_WALK_MAX）不挂死；无 session 行的孤儿 usage 自成一行。
+    返回列与旧版一致：(sid, title, directory, requests, input, output, total, last_at)。"""
+    sess = {r["id"]: r for r in con.execute(
+        "select id, coalesce(parent_id,'') as parent_id, title, directory from session")}
+    flat = {r["session_id"]: r for r in con.execute(
+        """select session_id, count(*) as n, coalesce(sum(input_tokens),0) as inp,
+                  coalesce(sum(output_tokens),0) as outp,
+                  coalesce(sum(computed_total_tokens),0) as tot, max(completed_at) as last_at
+           from model_usage where status='completed' group by session_id""")}
+    tree = {}
+    for sid, fr in flat.items():
+        cur, hops = sid, 0
+        while hops < _ROOT_WALK_MAX:
+            prow = sess.get(cur)
+            if prow is None or not prow["parent_id"]:
+                break
+            cur, hops = prow["parent_id"], hops + 1
+        t = tree.setdefault(cur, [0, 0, 0, 0, 0])
+        t[0] += fr["n"]; t[1] += fr["inp"]; t[2] += fr["outp"]; t[3] += fr["tot"]
+        t[4] = max(t[4], fr["last_at"] or 0)
+    rows = []
+    for sid, t in tree.items():
+        srow = sess.get(sid)
+        if srow is not None and (srow["parent_id"] or sid.startswith("sess_subagent")):
+            continue   # 子会话用量已并入根；脏环两端都在环内时该行整体让位（不挂死不重复）
+        rows.append((sid,
+                     ((srow["title"] if srow else "") or "(无标题)"),
+                     ((srow["directory"] if srow else "") or ""),
+                     t[0], t[1], t[2], t[3], t[4]))
+    rows.sort(key=lambda r: -r[7])
+    return rows[:limit]
 
 
 def model_usage(con, days=7):
@@ -333,7 +357,7 @@ def render_days(con, days):
 
 
 def render_sessions(con, limit=10):
-    lines = [L(f"■ 最近 {limit} 个会话", f"■ Last {limit} sessions")]
+    lines = [L(f"■ 最近 {limit} 个主会话（数值含子代理）", f"■ Last {limit} main sessions (incl. sub-agents)")]
     for sid, title, d, n, inp, outp, total, last in recent_sessions(con, limit):
         t = _ts(last)
         if _LANG == "en" and title == "(无标题)":
