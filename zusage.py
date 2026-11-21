@@ -106,6 +106,7 @@ def fmt(n):
 
 
 SESSION_TIMEOUT_MS = 30 * 60 * 1000  # 最近30分钟有请求视为活跃会话
+_SUB_ACTIVE_MS = 30_000              # 子代理条目的"运行中"圆点：最近 30s 有 completed 活动
 
 
 _AGG_TTL_MS = 2000   # 聚合短缓存：今日合计/会话池是慢变量，2s 陈旧无感；泵 1.5s 拉一次省约一半全表聚合
@@ -135,19 +136,24 @@ def _scan_session_ids(con):
     return _cached_agg("scan", run)
 
 
+# 后代会话递归 CTE（本文件四个聚合查询共用单源）：union（非 union all）在 parent 成环时
+# 去重即收敛、有限步终止——union all 会无限循环活锁（泵 1.5s 拉快照 = 持续空转）；
+# 无环数据 parent_id 单列无菱形，每个 id 只产生一次，两种写法结果完全一致。
+_SUBS_CTE = ("with recursive subs(id) as ("
+             "select id from session where parent_id = ? "
+             "union select s.id from session s join subs on s.parent_id = subs.id)")
+
+
 def session_usage(con, sid):
     # 会话累计 = 主会话 + 全部后代会话（子代理/侧聊子会话/孙代，session.parent_id 递归）。
     # last_request_input 取最近一次 completed 请求的 input_tokens（= 当前上下文容量），
     # 必须钉死主会话 sid：WHERE 扩到后代后不能用相关子查询（m.session_id 会命中子会话，
     # 主会话容量被污染）。不能用 max(input_tokens)：会话压缩后 input 骤降，峰值永远不回落
     # （v28 修复）。turns 按 session_id||':'||turn_id 去重：turn_id 跨会话可能重复，
-    # 直接 distinct 会塌。
+    # 直接 distinct 会塌。turn_id 为 NULL 的行计入 requests 但不计入 turns
+    # （拼接结果为 NULL 被 distinct 丢弃；真实库有 goal_summary_title 等来源的此类行）。
     r = con.execute(
-        """with recursive subs(id) as (
-               select id from session where parent_id = ?
-               union all
-               select s.id from session s join subs on s.parent_id = subs.id
-           )
+        _SUBS_CTE + """
            select count(*), coalesce(sum(input_tokens),0), coalesce(sum(output_tokens),0),
                   coalesce(sum(reasoning_tokens),0), coalesce(sum(cache_read_input_tokens),0),
                   coalesce(sum(cache_creation_input_tokens),0), coalesce(sum(computed_total_tokens),0),
@@ -171,36 +177,32 @@ _ROOT_WALK_MAX = 20   # parent 链深度保护：正常 ≤3 层，脏数据成�
 
 
 def _resolve_root_sid(con, sid):
-    """沿 session.parent_id 向上走到根主会话（parent_id 为 NULL 或无 session 行为止）。
-    子代理/侧聊子会话归到主会话；查不到 session 行时原样返回；深度 ≤20 防环。"""
-    cur = sid
+    """沿 session.parent_id 向上走到根主会话（parent_id 为 NULL 为止）。
+    子代理/侧聊子会话归到主会话；sid 自己无 session 行时原样返回；
+    parent 悬挂（指向不存在的 id）或深度截断（脏环）时返回最后一个真实存在的
+    节点——调用方拿它必然查得到 session 行，不返回 ghost id。"""
+    cur, last_real = sid, sid
     for _ in range(_ROOT_WALK_MAX):
         r = con.execute("select parent_id from session where id=?", (cur,)).fetchone()
         if r is None or not r[0]:
-            return cur
+            return cur if r is not None else last_real
+        last_real = cur
         cur = r[0]
-    return cur
+    return last_real
 
 
 def _descendant_ids(con, sid):
     """递归 CTE：sid 的全部后代会话 id（子代理、侧聊子会话、孙代，逐层展开）。"""
     return [r[0] for r in con.execute(
-        """with recursive subs(id) as (
-               select id from session where parent_id = ?
-               union all
-               select s.id from session s join subs on s.parent_id = subs.id
-           ) select id from subs""", (sid,))]
+        _SUBS_CTE + """
+           select id from subs""", (sid,))]
 
 
 def _subtree_last_at(con, sid):
     """子树（主+后代）max(completed_at)：子代理跑着时主会话仍算活跃。
     走递归 CTE 子查询而非 IN(?,…) 参数列表——后代数量超 SQLite 变量上限会炸。"""
     r = con.execute(
-        """with recursive subs(id) as (
-               select id from session where parent_id = ?
-               union all
-               select s.id from session s join subs on s.parent_id = subs.id
-           )
+        _SUBS_CTE + """
            select max(completed_at) from model_usage
            where session_id = ? or session_id in (select id from subs)""",
         (sid, sid)).fetchone()
@@ -211,11 +213,7 @@ def _subs_usage_row(con, sid):
     """后代（不含主会话）completed 行聚合一行：requests, total, input, output,
     cache_read, reasoning, cache_write, max(completed_at)。无后代时 requests=0。"""
     return con.execute(
-        """with recursive subs(id) as (
-               select id from session where parent_id = ?
-               union all
-               select s.id from session s join subs on s.parent_id = subs.id
-           )
+        _SUBS_CTE + """
            select count(*), coalesce(sum(computed_total_tokens),0), coalesce(sum(input_tokens),0),
                   coalesce(sum(output_tokens),0), coalesce(sum(cache_read_input_tokens),0),
                   coalesce(sum(reasoning_tokens),0), coalesce(sum(cache_creation_input_tokens),0),
@@ -369,7 +367,8 @@ _SUB_PREFIX_LEN = 13   # len("sess_subagent")
 
 
 def _usage_rows(con, sids):
-    """一批会话的 completed 用量（口径与 session_usage 一致），返回 session_id → row。"""
+    """一批会话的 completed 用量按 session_id 平铺聚合（workspace 口径：主/子各自单列，
+    与 session_usage 的全树合并口径不同——树口径请走 session_usage），返回 session_id → row。"""
     qm = ",".join("?" * len(sids))
     per = {}
     for r in con.execute(
@@ -687,7 +686,7 @@ def _light_snapshot(con, sid, cfg):
         r = _subs_usage_row(con, sid)
         sub = {"requests": r[0], "total": r[1], "input": r[2], "output": r[3],
                "cache_read": r[4], "reasoning": r[5], "cache_write": r[6],
-               "active": bool(r[7] and now_ms - r[7] < 30000), "list": []}
+               "active": bool(r[7] and now_ms - r[7] < _SUB_ACTIVE_MS), "list": []}
     return {
         "sid": sid,
         "title": (srow["title"] if srow is not None else "") or "",
@@ -881,13 +880,13 @@ def _session_snapshot(con, sid, cfg):
         "cache_read": sum(r[7] for r in sub_rows),
         "reasoning": sum(r[8] for r in sub_rows),
         "cache_write": sum(r[9] for r in sub_rows),
-        "active": any(r[10] and now_ms - r[10] < 30000 for r in sub_rows),
+        "active": any(r[10] and now_ms - r[10] < _SUB_ACTIVE_MS for r in sub_rows),
         "list": [
             {"sid": r[0], "agent": r[1], "title": r[2], "task": sub_tasks.get(r[0], ""),
              "requests": r[3], "total": r[4],
              "input": r[5], "output": r[6], "cache_read": r[7], "reasoning": r[8],
              "cache_write": r[9], "last": (r[10] or 0),
-             "active": bool(r[10] and now_ms - r[10] < 30000)}
+             "active": bool(r[10] and now_ms - r[10] < _SUB_ACTIVE_MS)}
             for r in sub_rows
         ],
     }
@@ -922,7 +921,7 @@ def _session_snapshot(con, sid, cfg):
         "tool_calls": u["tool_calls"] if u else 0,
         "retries": u["retries"] if u else 0,
         "ctx": u["last_request_input"] if u else 0,
-                    "updated": (_ts(last_at).strftime("%H:%M:%S") if last_at else ""),
+        "updated": (_ts(last_at).strftime("%H:%M:%S") if last_at else ""),
         "sub": sub,
         "tools": tools,
         "last_turn": lt,
@@ -950,7 +949,7 @@ def _session_snapshot(con, sid, cfg):
         ).fetchone()[0],
         "context_window": ctx_auto or cfg["context_window"],
         "context_auto": ctx_auto is not None,
-                    "last_at": (last_at if last_at else 0),
+        "last_at": (last_at if last_at else 0),
         "is_sub": sid.startswith("sess_subagent"),
         "parent": (srow["parent_id"] if srow is not None else None),
     }

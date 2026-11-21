@@ -126,6 +126,32 @@ class SessionUsageMergeTests(unittest.TestCase):
         self.assertEqual(u["requests"], 1)
         self.assertEqual(u["total"], 43)
 
+    def test_parent_cycle_terminates_with_finite_result(self):
+        # 脏数据 parent 环（a↔b）：聚合 CTE 必须 union 去重收敛，有限步返回且不重复计数
+        db = MockDB()
+        db.session("a", parent="b", title="A")
+        db.session("b", parent="a", title="B")
+        db.req("a", turn="t1", inp=100, out=10)
+        db.req("b", turn="t1", inp=200, out=20)
+        u = zusage.session_usage(db.con, "a")
+        self.assertEqual(u["requests"], 2)
+        self.assertEqual(u["input"], 300)
+        self.assertEqual(u["total"], 330)
+        self.assertEqual(u["turns"], 2)   # a:t1 与 b:t1 两条拼接键
+        self.assertEqual(sorted(zusage._descendant_ids(db.con, "a")), ["a", "b"])
+
+    def test_null_turn_id_counts_in_requests_not_turns(self):
+        # 真实库存在 turn_id IS NULL 的 completed 行（goal_summary_title 等来源）：
+        # 计入 requests，不计入 turns（拼接为 NULL 被 distinct 丢弃）
+        db = MockDB()
+        db.session("m1")
+        db.req("m1", turn="t1", inp=100, out=10)
+        db.req("m1", turn=None, inp=200, out=20)
+        u = zusage.session_usage(db.con, "m1")
+        self.assertEqual(u["requests"], 2)
+        self.assertEqual(u["turns"], 1)
+        self.assertEqual(u["total"], 330)
+
 
 class ResolveRootSidTests(unittest.TestCase):
     def setUp(self):
